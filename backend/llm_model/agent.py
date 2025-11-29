@@ -119,6 +119,35 @@ class Agent:
             - {'type': 'graph_update', 'graph_data': dict} - Updated graph
             - {'type': 'done'} - Completion signal
         """
+        # Define tools for OpenAI function calling
+        tools_schema = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_task_node",
+                    "description": "Create a new task node in the task graph. Use this when breaking down tasks into subtasks.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "task_name": {
+                                "type": "string",
+                                "description": "Name of the task"
+                            },
+                            "task_description": {
+                                "type": "string",
+                                "description": "Detailed description of the task"
+                            },
+                            "parent_id": {
+                                "type": "string",
+                                "description": "ID of the parent task (optional)"
+                            }
+                        },
+                        "required": ["task_name", "task_description"]
+                    }
+                }
+            }
+        ]
+
         # Build the system message with task context
         system_message = {
             "role": "system",
@@ -136,6 +165,7 @@ Guidelines:
 - Guide users to be more specific before creating tasks
 - Ask clarifying questions when tasks are vague
 - Only create task nodes when you have clear, well-defined tasks
+- Use the create_task_node function to add tasks to the graph
 - Be conversational and helpful"""
         }
 
@@ -143,29 +173,96 @@ Guidelines:
         messages = [system_message] + chat_history
 
         try:
-            # Create streaming completion using OpenAI client directly
+            # Create streaming completion with tool calling support
             stream = await self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
+                tools=tools_schema,
                 stream=True,
                 temperature=0.7,
             )
 
+            # Track tool calls as they're streamed
+            tool_calls_map = {}  # Maps tool call index to accumulated data
+
             # Stream the response token by token
             async for chunk in stream:
-                # Extract the content delta from the chunk
-                if chunk.choices and len(chunk.choices) > 0:
-                    delta = chunk.choices[0].delta
+                if not chunk.choices or len(chunk.choices) == 0:
+                    continue
 
-                    # Check if there's content to stream
-                    if delta.content:
+                delta = chunk.choices[0].delta
+
+                # Handle text content streaming
+                if delta.content:
+                    yield {
+                        'type': 'token',
+                        'content': delta.content
+                    }
+
+                # Handle tool calls streaming
+                if delta.tool_calls:
+                    for tool_call_delta in delta.tool_calls:
+                        index = tool_call_delta.index
+
+                        # Initialize tool call entry if needed
+                        if index not in tool_calls_map:
+                            tool_calls_map[index] = {
+                                'id': tool_call_delta.id or '',
+                                'name': '',
+                                'arguments': ''
+                            }
+
+                        # Accumulate tool call data
+                        if tool_call_delta.id:
+                            tool_calls_map[index]['id'] = tool_call_delta.id
+
+                        if tool_call_delta.function:
+                            if tool_call_delta.function.name:
+                                tool_calls_map[index]['name'] = tool_call_delta.function.name
+
+                            if tool_call_delta.function.arguments:
+                                tool_calls_map[index]['arguments'] += tool_call_delta.function.arguments
+
+            # Execute tool calls and update graph
+            for tool_call_data in tool_calls_map.values():
+                if tool_call_data['name'] == 'create_task_node':
+                    try:
+                        # Parse the arguments
+                        args = json.loads(tool_call_data['arguments'])
+
+                        # Import the tool function
+                        from .tools import create_task_node
+
+                        # Execute the tool
+                        node = create_task_node(
+                            task_name=args['task_name'],
+                            task_description=args['task_description'],
+                            parent_id=args.get('parent_id')
+                        )
+
+                        # Update graph data
+                        if len(graph_data["nodes"]) > 0 and node.get("parent_id"):
+                            graph_data["links"].append({
+                                "source": node["parent_id"],
+                                "target": node["id"]
+                            })
+
+                        graph_data["nodes"].append({
+                            "id": node["id"],
+                            "name": node["name"],
+                            "description": node["description"]
+                        })
+
+                        logger.info(f"Created task node: {node['name']}")
+
+                    except Exception as e:
+                        logger.error(f"Error executing tool call: {e}")
                         yield {
                             'type': 'token',
-                            'content': delta.content
+                            'content': f"\n\n[Error creating task: {str(e)}]"
                         }
 
-            # For now, send graph update at the end
-            # In the next iteration, we'll add tool calling support to update the graph
+            # Send final graph update
             yield {
                 'type': 'graph_update',
                 'graph_data': graph_data
