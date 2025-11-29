@@ -138,15 +138,23 @@ class Agent:
                     self.api_key = api_key  # Store api_key as instance attribute
                     self.stream_queue = stream_queue
                     self.base_client = AsyncOpenAI(api_key=api_key)
+                    self.call_count = 0  # Track which LM call we're on
 
                 def __call__(self, prompt=None, messages=None, **kwargs):
                     """Override to capture and stream responses"""
                     # Use the parent's __call__ but intercept for streaming
                     import openai
 
+                    self.call_count += 1
+
                     # Prepare the request
                     if messages is None and prompt:
                         messages = [{"role": "user", "content": prompt}]
+
+                    # Detect if this is a thinking call or final response
+                    # ReAct makes multiple calls - early ones are thinking, last is response
+                    prompt_text = str(prompt or messages)
+                    is_thinking = 'next_thought' in prompt_text or 'Thought' in prompt_text or self.call_count == 1
 
                     # Make streaming request to OpenAI directly
                     client = openai.OpenAI(api_key=self.api_key)
@@ -164,8 +172,9 @@ class Agent:
                             delta = chunk.choices[0].delta
                             if delta.content:
                                 full_response += delta.content
-                                # Send to queue for async streaming
-                                self.stream_queue.put(('token', delta.content))
+                                # Send to queue with appropriate type
+                                msg_type = 'thinking' if is_thinking else 'token'
+                                self.stream_queue.put((msg_type, delta.content))
 
                     # Return in format DSPy expects
                     return [full_response]
@@ -206,6 +215,11 @@ class Agent:
                     if msg_type == 'token':
                         yield {
                             'type': 'token',
+                            'content': content
+                        }
+                    elif msg_type == 'thinking':
+                        yield {
+                            'type': 'thinking',
                             'content': content
                         }
                 except queue.Empty:

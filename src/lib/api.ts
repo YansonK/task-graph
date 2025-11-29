@@ -60,12 +60,14 @@ export async function sendMessage(request: ChatRequest): Promise<ChatResponse> {
  *
  * @param request - Chat request with history and graph
  * @param onToken - Callback for each token received
+ * @param onThinking - Callback for each thinking token received
  * @param onGraphUpdate - Callback when graph is updated
  * @param onDone - Callback when streaming completes
  */
 export async function sendMessageStream(
   request: ChatRequest,
   onToken: (token: string) => void,
+  onThinking: (token: string) => void,
   onGraphUpdate: (graphData: GraphData) => void,
   onDone: () => void
 ): Promise<void> {
@@ -112,6 +114,9 @@ export async function sendMessageStream(
             switch (parsed.type) {
               case 'token':
                 onToken(parsed.content);
+                break;
+              case 'thinking':
+                onThinking(parsed.content);
                 break;
               case 'graph_update':
                 onGraphUpdate(parsed.graph_data);

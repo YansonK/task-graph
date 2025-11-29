@@ -49,6 +49,9 @@ const Index = () => {
     },
   ]);
 
+  const [thinkingContent, setThinkingContent] = useState<string>('');
+  const [showThinking, setShowThinking] = useState<boolean>(false);
+
   const handleTaskSubmit = async (task: string) => {
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -59,6 +62,10 @@ const Index = () => {
 
     const newMessages = [...messages, userMessage];
     setMessages(newMessages);
+
+    // Reset thinking content
+    setThinkingContent('');
+    setShowThinking(true);
 
     // Create a placeholder assistant message that will be updated with streaming content
     const assistantMessageId = (Date.now() + 1).toString();
@@ -97,6 +104,10 @@ const Index = () => {
             )
           );
         },
+        // onThinking: Append thinking content
+        (thinking: string) => {
+          setThinkingContent(prev => prev + thinking);
+        },
         // onGraphUpdate: Update the graph data
         (updatedGraph: APIGraphData) => {
           console.log("Graph data updated:", updatedGraph);
@@ -105,6 +116,7 @@ const Index = () => {
         // onDone: Streaming complete
         () => {
           console.log("Streaming complete");
+          setShowThinking(false);
         }
       );
     } catch (error) {
@@ -172,11 +184,26 @@ const Index = () => {
       <div className={`absolute right-0 top-0 h-full transition-transform duration-300 ease-in-out ${
         isCollapsed ? 'translate-x-full' : 'translate-x-0'
       }`}>
-        <div className="w-[400px] h-full bg-background/80 backdrop-blur-sm p-6">
-          <ChatInterface 
-            messages={messages}
-            onTaskSubmit={handleTaskSubmit}
-          />
+        <div className="w-[400px] h-full bg-background/80 backdrop-blur-sm p-6 flex flex-col">
+          {/* Thinking Display */}
+          {showThinking && thinkingContent && (
+            <div className="mb-4 p-3 bg-muted/50 rounded-lg border border-muted">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+                <span className="text-xs font-medium text-muted-foreground">Agent Thinking...</span>
+              </div>
+              <div className="text-xs text-muted-foreground/70 font-mono whitespace-pre-wrap max-h-32 overflow-y-auto">
+                {thinkingContent}
+              </div>
+            </div>
+          )}
+
+          <div className="flex-1 min-h-0">
+            <ChatInterface
+              messages={messages}
+              onTaskSubmit={handleTaskSubmit}
+            />
+          </div>
         </div>
       </div>
 
