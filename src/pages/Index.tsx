@@ -12,6 +12,7 @@ interface Message {
   content: string;
   timestamp: Date;
   isThinking?: boolean;
+  thinking?: string; // Agent's reasoning process
 }
 
 interface Link {
@@ -51,9 +52,6 @@ const Index = () => {
       timestamp: new Date(),
     },
   ]);
-
-  const [thinkingContent, setThinkingContent] = useState<string>('');
-  const [showThinking, setShowThinking] = useState<boolean>(false);
 
   // Handle resize drag
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -111,10 +109,6 @@ const Index = () => {
     const newMessages = [...messages, userMessage];
     setMessages(newMessages);
 
-    // Reset thinking content
-    setThinkingContent('');
-    setShowThinking(true);
-
     // Create a placeholder assistant message that will be updated with streaming content
     const assistantMessageId = (Date.now() + 1).toString();
     const assistantMessage: Message = {
@@ -123,6 +117,7 @@ const Index = () => {
       content: '',
       timestamp: new Date(),
       isThinking: true,
+      thinking: '', // Initialize thinking content
     };
 
     setMessages(prev => [...prev, assistantMessage]);
@@ -152,9 +147,25 @@ const Index = () => {
             )
           );
         },
-        // onThinking: Append thinking content
+        // onThinking: Append thinking content to the message
         (thinking: string) => {
-          setThinkingContent(prev => prev + thinking);
+          setMessages(prev =>
+            prev.map(msg =>
+              msg.id === assistantMessageId
+                ? { ...msg, thinking: (msg.thinking || '') + thinking }
+                : msg
+            )
+          );
+        },
+        // onReplaceResponse: Replace the entire response content
+        (content: string) => {
+          setMessages(prev =>
+            prev.map(msg =>
+              msg.id === assistantMessageId
+                ? { ...msg, content: content, isThinking: false }
+                : msg
+            )
+          );
         },
         // onGraphUpdate: Update the graph data
         (updatedGraph: APIGraphData) => {
@@ -164,7 +175,6 @@ const Index = () => {
         // onDone: Streaming complete
         () => {
           console.log("Streaming complete");
-          setShowThinking(false);
         }
       );
     } catch (error) {
@@ -249,25 +259,10 @@ const Index = () => {
         )}
 
         <div className="h-full bg-background/80 backdrop-blur-sm p-6 flex flex-col">
-          {/* Thinking Display */}
-          {showThinking && thinkingContent && (
-            <div className="mb-4 p-3 bg-muted/50 rounded-lg border border-muted">
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
-                <span className="text-xs font-medium text-muted-foreground">Agent Thinking...</span>
-              </div>
-              <div className="text-xs text-muted-foreground/70 font-mono whitespace-pre-wrap max-h-32 overflow-y-auto">
-                {thinkingContent}
-              </div>
-            </div>
-          )}
-
-          <div className="flex-1 min-h-0">
-            <ChatInterface
-              messages={messages}
-              onTaskSubmit={handleTaskSubmit}
-            />
-          </div>
+          <ChatInterface
+            messages={messages}
+            onTaskSubmit={handleTaskSubmit}
+          />
         </div>
       </div>
 

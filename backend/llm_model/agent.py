@@ -176,6 +176,17 @@ class Agent:
                                 msg_type = 'thinking' if is_thinking else 'token'
                                 self.stream_queue.put((msg_type, delta.content))
 
+                    # If this is the final response, extract only content between markers
+                    if not is_thinking and '[[ ## response ## ]]' in full_response:
+                        # Extract content between response markers
+                        import re
+                        match = re.search(r'\[\[ ## response ## \]\](.*?)\[\[ ## completed ## \]\]', full_response, re.DOTALL)
+                        if match:
+                            extracted_response = match.group(1).strip()
+                            # Send a special marker to clear previous content and replace with extracted
+                            self.stream_queue.put(('replace_response', extracted_response))
+                            full_response = extracted_response
+
                     # Return in format DSPy expects
                     return [full_response]
 
@@ -220,6 +231,11 @@ class Agent:
                     elif msg_type == 'thinking':
                         yield {
                             'type': 'thinking',
+                            'content': content
+                        }
+                    elif msg_type == 'replace_response':
+                        yield {
+                            'type': 'replace_response',
                             'content': content
                         }
                 except queue.Empty:
