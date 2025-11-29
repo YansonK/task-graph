@@ -112,9 +112,9 @@ class Agent:
 
     async def query_stream(self, chat_history, graph_data) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        Streaming query method using DSPy's ReAct agent with streaming support.
+        Streaming query method using DSPy's ReAct agent with TRUE real-time streaming.
 
-        This provides intelligent multi-step reasoning with real-time streaming output.
+        This provides intelligent multi-step reasoning with tokens streamed as generated.
 
         Yields:
             Dict with 'type' and corresponding data:
@@ -122,104 +122,155 @@ class Agent:
             - {'type': 'graph_update', 'graph_data': dict} - Updated graph
         """
         try:
-            # Storage for streamed content
-            streamed_response = []
+            # Queue to communicate between sync ReAct and async streaming
+            import queue
+            import threading
 
-            # Create a callback to capture streaming output
-            class StreamCallback:
-                def __init__(self, yield_fn):
-                    self.yield_fn = yield_fn
-                    self.buffer = ""
+            stream_queue = queue.Queue()
+            agent_done = threading.Event()
+            agent_result = {}
+            agent_error = {}
 
-                async def on_chunk(self, chunk):
-                    """Called for each streaming chunk"""
-                    if chunk:
-                        self.buffer += chunk
-                        await self.yield_fn({
-                            'type': 'token',
-                            'content': chunk
-                        })
-                        streamed_response.append(chunk)
+            # Custom streaming callback
+            class StreamingLM(dspy.LM):
+                def __init__(self, model, api_key, stream_queue):
+                    super().__init__(model=model, api_key=api_key)
+                    self.stream_queue = stream_queue
+                    self.base_client = AsyncOpenAI(api_key=api_key)
 
-            # Configure the LM with streaming
-            lm = dspy.LM('openai/gpt-4o-mini', api_key=self.api_key)
+                def __call__(self, prompt=None, messages=None, **kwargs):
+                    """Override to capture and stream responses"""
+                    # Use the parent's __call__ but intercept for streaming
+                    import openai
 
-            # Run the ReAct agent in a thread pool to avoid blocking
-            def run_react_agent():
-                # Temporarily configure DSPy to use streaming LM
-                with dspy.context(lm=lm):
-                    result = self.react_agent(
-                        conversation_history=chat_history,
-                        task_nodes=graph_data
+                    # Prepare the request
+                    if messages is None and prompt:
+                        messages = [{"role": "user", "content": prompt}]
+
+                    # Make streaming request to OpenAI directly
+                    client = openai.OpenAI(api_key=self.api_key)
+                    stream = client.chat.completions.create(
+                        model=self.model.replace('openai/', ''),
+                        messages=messages,
+                        stream=True,
+                        **kwargs
                     )
-                return result
 
-            # Execute ReAct agent in background
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, run_react_agent)
+                    # Collect response while streaming
+                    full_response = ""
+                    for chunk in stream:
+                        if chunk.choices and len(chunk.choices) > 0:
+                            delta = chunk.choices[0].delta
+                            if delta.content:
+                                full_response += delta.content
+                                # Send to queue for async streaming
+                                self.stream_queue.put(('token', delta.content))
 
-            # Stream the response character by character for smooth streaming effect
-            response_text = str(result.response)
-            chunk_size = 5  # Small chunks for smooth streaming
+                    # Return in format DSPy expects
+                    return [full_response]
 
-            for i in range(0, len(response_text), chunk_size):
-                chunk = response_text[i:i + chunk_size]
-                yield {
-                    'type': 'token',
-                    'content': chunk
-                }
-                await asyncio.sleep(0.01)  # Small delay for smooth streaming
+            # Run ReAct agent in background thread with streaming LM
+            def run_react_with_streaming():
+                try:
+                    # Create streaming LM instance
+                    streaming_lm = StreamingLM(
+                        model='openai/gpt-4o-mini',
+                        api_key=self.api_key,
+                        stream_queue=stream_queue
+                    )
+
+                    # Run ReAct with streaming LM
+                    with dspy.context(lm=streaming_lm):
+                        result = self.react_agent(
+                            conversation_history=chat_history,
+                            task_nodes=graph_data
+                        )
+
+                    agent_result['result'] = result
+                except Exception as e:
+                    agent_error['error'] = e
+                    logger.error(f"ReAct agent error: {e}")
+                finally:
+                    agent_done.set()
+
+            # Start the agent in background thread
+            agent_thread = threading.Thread(target=run_react_with_streaming)
+            agent_thread.start()
+
+            # Stream tokens from queue as they arrive
+            while not agent_done.is_set() or not stream_queue.empty():
+                try:
+                    # Try to get tokens from queue
+                    msg_type, content = stream_queue.get(timeout=0.1)
+                    if msg_type == 'token':
+                        yield {
+                            'type': 'token',
+                            'content': content
+                        }
+                except queue.Empty:
+                    # No tokens available, continue waiting
+                    await asyncio.sleep(0.01)
+
+            # Wait for thread to complete
+            agent_thread.join()
+
+            # Check for errors
+            if 'error' in agent_error:
+                raise agent_error['error']
 
             # Process tool calls and update graph
-            for i in range(max_iters):
-                current_tool = f"tool_name_{i}"
-                tool_result = f'observation_{i}'
+            if 'result' in agent_result:
+                result = agent_result['result']
 
-                if current_tool not in result.trajectory:
-                    break
+                for i in range(max_iters):
+                    current_tool = f"tool_name_{i}"
+                    tool_result = f'observation_{i}'
 
-                if result.trajectory[current_tool] == "create_task_node":
-                    # Create a new task node
-                    node_data = result.trajectory[tool_result]
-
-                    # Check if this is an error message
-                    if isinstance(node_data, str) and ("error" in node_data.lower() or "execution error" in node_data.lower()):
-                        logger.error(f"Tool execution failed: {node_data}")
+                    if current_tool not in result.trajectory:
                         break
 
-                    # Parse if it's a string (JSON or dict representation)
-                    if isinstance(node_data, str):
-                        try:
-                            node = json.loads(node_data)
-                        except json.JSONDecodeError:
-                            # Try eval as fallback (for dict string representation)
+                    if result.trajectory[current_tool] == "create_task_node":
+                        # Create a new task node
+                        node_data = result.trajectory[tool_result]
+
+                        # Check if this is an error message
+                        if isinstance(node_data, str) and ("error" in node_data.lower() or "execution error" in node_data.lower()):
+                            logger.error(f"Tool execution failed: {node_data}")
+                            break
+
+                        # Parse if it's a string (JSON or dict representation)
+                        if isinstance(node_data, str):
                             try:
-                                import ast
-                                node = ast.literal_eval(node_data)
-                            except (SyntaxError, ValueError) as e:
-                                logger.error(f"Failed to parse node data: {node_data}. Error: {e}")
-                                break
-                    else:
-                        node = node_data
+                                node = json.loads(node_data)
+                            except json.JSONDecodeError:
+                                # Try eval as fallback (for dict string representation)
+                                try:
+                                    import ast
+                                    node = ast.literal_eval(node_data)
+                                except (SyntaxError, ValueError) as e:
+                                    logger.error(f"Failed to parse node data: {node_data}. Error: {e}")
+                                    break
+                        else:
+                            node = node_data
 
-                    # Validate node has required fields
-                    if not isinstance(node, dict) or "id" not in node or "name" not in node:
-                        logger.error(f"Invalid node data: {node}")
-                        break
+                        # Validate node has required fields
+                        if not isinstance(node, dict) or "id" not in node or "name" not in node:
+                            logger.error(f"Invalid node data: {node}")
+                            break
 
-                    if len(graph_data["nodes"]) > 0 and node.get("parent_id"):
-                        graph_data["links"].append({
-                            "source": node["parent_id"],
-                            "target": node["id"]
+                        if len(graph_data["nodes"]) > 0 and node.get("parent_id"):
+                            graph_data["links"].append({
+                                "source": node["parent_id"],
+                                "target": node["id"]
+                            })
+
+                        graph_data["nodes"].append({
+                            "id": node["id"],
+                            "name": node["name"],
+                            "description": node["description"]
                         })
 
-                    graph_data["nodes"].append({
-                        "id": node["id"],
-                        "name": node["name"],
-                        "description": node["description"]
-                    })
-
-                    logger.info(f"Created task node: {node['name']}")
+                        logger.info(f"Created task node: {node['name']}")
 
             # Send final graph update
             yield {
