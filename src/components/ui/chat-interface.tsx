@@ -2,12 +2,14 @@ import React from 'react';
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar } from "@/components/ui/avatar";
 import { Bot, User } from "lucide-react";
+import ThinkingIndicator from "@/components/ui/thinking-indicator";
 
 interface Message {
   id: string;
   type: 'user' | 'assistant';
   content: string;
   timestamp: Date;
+  isThinking?: boolean;
 }
 
 interface ChatInterfaceProps {
@@ -40,7 +42,11 @@ const ChatInterface = ({ messages, onTaskSubmit }: ChatInterfaceProps) => {
                     : 'bg-muted'
                 }`}
               >
-                <p className="text-sm">{message.content}</p>
+                {message.isThinking ? (
+                  <ThinkingIndicator />
+                ) : (
+                  <p className="text-sm">{message.content}</p>
+                )}
                 <span className="text-xs opacity-70 mt-1 block">
                   {new Date(message.timestamp).toLocaleTimeString()}
                 </span>

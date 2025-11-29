@@ -11,6 +11,7 @@ interface Message {
   type: 'user' | 'assistant';
   content: string;
   timestamp: Date;
+  isThinking?: boolean;
 }
 
 interface Link {
@@ -66,6 +67,7 @@ const Index = () => {
       type: 'assistant',
       content: '',
       timestamp: new Date(),
+      isThinking: true,
     };
 
     setMessages(prev => [...prev, assistantMessage]);
@@ -90,7 +92,7 @@ const Index = () => {
           setMessages(prev =>
             prev.map(msg =>
               msg.id === assistantMessageId
-                ? { ...msg, content: msg.content + token }
+                ? { ...msg, content: msg.content + token, isThinking: false }
                 : msg
             )
           );
@@ -108,15 +110,14 @@ const Index = () => {
     } catch (error) {
       console.error("Error processing task:", error);
 
-      // Show error message to user
-      const errorMessage: Message = {
-        id: (Date.now() + 2).toString(),
-        type: 'assistant',
-        content: 'Sorry, there was an error processing your request. Please try again.',
-        timestamp: new Date(),
-      };
-
-      setMessages(prev => [...prev, errorMessage]);
+      // Clear thinking state and show error message
+      setMessages(prev =>
+        prev.map(msg =>
+          msg.id === assistantMessageId
+            ? { ...msg, content: 'Sorry, there was an error processing your request. Please try again.', isThinking: false }
+            : msg
+        )
+      );
     }
   };
   const handleNodeUpdate = (nodeId: string, updates: any) => {
