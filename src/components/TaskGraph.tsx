@@ -707,6 +707,24 @@ const TaskGraph = ({ data, showDescriptions = true, isChatOpen = false, onNodeUp
           ctx.fillText(label, node.x!, node.y!);
         }}
         nodeCanvasObjectMode={() => "replace"}
+        nodePointerAreaPaint={(node, color, ctx, globalScale) => {
+          // Define the clickable area to match the visual node rectangle
+          const typedNode = node as Node;
+          const label = typedNode.name;
+          const fontSize = 14/globalScale;
+          ctx.font = `${fontSize}px Inter, Sans-Serif`;
+          const textWidth = ctx.measureText(label).width;
+          const bckgDimensions = [textWidth, fontSize].map(n => n + fontSize * 0.8);
+
+          // Draw a filled rectangle for the clickable area
+          ctx.fillStyle = color;
+          ctx.fillRect(
+            node.x! - bckgDimensions[0] / 2,
+            node.y! - bckgDimensions[1] / 2,
+            bckgDimensions[0],
+            bckgDimensions[1]
+          );
+        }}
       />
       
       {/* Node Actions Menu */}
