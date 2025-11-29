@@ -37,8 +37,11 @@ const Index = () => {
     nodes: [],
     links: [],
   });
-  
+
   const [isCollapsed, setIsCollapsed] = useState(true);
+  const [chatWidth, setChatWidth] = useState(400); // Current chat width
+  const [savedChatWidth, setSavedChatWidth] = useState(400); // Width before collapse
+  const [isResizing, setIsResizing] = useState(false);
   const [showDescriptions, setShowDescriptions] = useState(true);
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -51,6 +54,51 @@ const Index = () => {
 
   const [thinkingContent, setThinkingContent] = useState<string>('');
   const [showThinking, setShowThinking] = useState<boolean>(false);
+
+  // Handle resize drag
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  };
+
+  React.useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return;
+
+      const newWidth = window.innerWidth - e.clientX;
+      // Minimum width is 400px, maximum is 80% of screen
+      const clampedWidth = Math.max(400, Math.min(newWidth, window.innerWidth * 0.8));
+      setChatWidth(clampedWidth);
+      setSavedChatWidth(clampedWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    }
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
+
+  // Handle collapse/expand with width memory
+  const toggleChat = () => {
+    if (isCollapsed) {
+      // Expanding - restore saved width
+      setChatWidth(savedChatWidth);
+      setIsCollapsed(false);
+    } else {
+      // Collapsing - save current width
+      setSavedChatWidth(chatWidth);
+      setIsCollapsed(true);
+    }
+  };
 
   const handleTaskSubmit = async (task: string) => {
     const userMessage: Message = {
@@ -181,10 +229,26 @@ const Index = () => {
         />
       </div>
 
-      <div className={`absolute right-0 top-0 h-full transition-transform duration-300 ease-in-out ${
-        isCollapsed ? 'translate-x-full' : 'translate-x-0'
-      }`}>
-        <div className="w-[400px] h-full bg-background/80 backdrop-blur-sm p-6 flex flex-col">
+      <div
+        className={`absolute right-0 top-0 h-full transition-transform duration-300 ease-in-out ${
+          isCollapsed ? 'translate-x-full' : 'translate-x-0'
+        }`}
+        style={{ width: `${chatWidth}px` }}
+      >
+        {/* Resize Handle */}
+        {!isCollapsed && (
+          <div
+            onMouseDown={handleMouseDown}
+            className={`absolute left-0 top-0 h-full w-2 cursor-ew-resize flex items-center justify-center hover:bg-muted/50 transition-colors ${
+              isResizing ? 'bg-muted/50' : ''
+            }`}
+            style={{ zIndex: 60 }}
+          >
+            <div className="w-1 h-12 bg-muted-foreground/20 rounded-full" />
+          </div>
+        )}
+
+        <div className="h-full bg-background/80 backdrop-blur-sm p-6 flex flex-col">
           {/* Thinking Display */}
           {showThinking && thinkingContent && (
             <div className="mb-4 p-3 bg-muted/50 rounded-lg border border-muted">
@@ -210,7 +274,7 @@ const Index = () => {
       <Button
         variant="ghost"
         className="absolute right-4 top-2 z-50"
-        onClick={() => setIsCollapsed(!isCollapsed)}
+        onClick={toggleChat}
         size="sm"
       >
         {isCollapsed ? <ChevronLeft /> : <ChevronRight />}
