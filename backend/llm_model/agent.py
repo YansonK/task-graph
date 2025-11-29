@@ -184,6 +184,7 @@ Guidelines:
 
             # Track tool calls as they're streamed
             tool_calls_map = {}  # Maps tool call index to accumulated data
+            assistant_message_content = ""  # Track the assistant's text response
 
             # Stream the response token by token
             async for chunk in stream:
@@ -194,6 +195,7 @@ Guidelines:
 
                 # Handle text content streaming
                 if delta.content:
+                    assistant_message_content += delta.content
                     yield {
                         'type': 'token',
                         'content': delta.content
@@ -223,50 +225,105 @@ Guidelines:
                             if tool_call_delta.function.arguments:
                                 tool_calls_map[index]['arguments'] += tool_call_delta.function.arguments
 
-            # Execute tool calls and update graph
-            for tool_call_data in tool_calls_map.values():
-                if tool_call_data['name'] == 'create_task_node':
-                    try:
-                        # Parse the arguments
-                        args = json.loads(tool_call_data['arguments'])
+            # If there are tool calls, execute them and continue the conversation
+            if tool_calls_map:
+                # Build assistant message with tool calls for conversation history
+                assistant_message = {
+                    "role": "assistant",
+                    "content": assistant_message_content or None,
+                    "tool_calls": [
+                        {
+                            "id": tc['id'],
+                            "type": "function",
+                            "function": {
+                                "name": tc['name'],
+                                "arguments": tc['arguments']
+                            }
+                        }
+                        for tc in tool_calls_map.values()
+                    ]
+                }
 
-                        # Import the tool function
-                        from .tools import create_task_node
+                # Execute tool calls and build tool response messages
+                tool_messages = []
+                for tool_call_data in tool_calls_map.values():
+                    if tool_call_data['name'] == 'create_task_node':
+                        try:
+                            # Parse the arguments
+                            args = json.loads(tool_call_data['arguments'])
 
-                        # Execute the tool
-                        node = create_task_node(
-                            task_name=args['task_name'],
-                            task_description=args['task_description'],
-                            parent_id=args.get('parent_id')
-                        )
+                            # Import the tool function
+                            from .tools import create_task_node
 
-                        # Update graph data
-                        if len(graph_data["nodes"]) > 0 and node.get("parent_id"):
-                            graph_data["links"].append({
-                                "source": node["parent_id"],
-                                "target": node["id"]
+                            # Execute the tool
+                            node = create_task_node(
+                                task_name=args['task_name'],
+                                task_description=args['task_description'],
+                                parent_id=args.get('parent_id')
+                            )
+
+                            # Update graph data
+                            if len(graph_data["nodes"]) > 0 and node.get("parent_id"):
+                                graph_data["links"].append({
+                                    "source": node["parent_id"],
+                                    "target": node["id"]
+                                })
+
+                            graph_data["nodes"].append({
+                                "id": node["id"],
+                                "name": node["name"],
+                                "description": node["description"]
                             })
 
-                        graph_data["nodes"].append({
-                            "id": node["id"],
-                            "name": node["name"],
-                            "description": node["description"]
-                        })
+                            logger.info(f"Created task node: {node['name']}")
 
-                        logger.info(f"Created task node: {node['name']}")
+                            # Add tool response message
+                            tool_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call_data['id'],
+                                "content": json.dumps({"success": True, "node": node})
+                            })
 
-                    except Exception as e:
-                        logger.error(f"Error executing tool call: {e}")
-                        yield {
-                            'type': 'token',
-                            'content': f"\n\n[Error creating task: {str(e)}]"
-                        }
+                        except Exception as e:
+                            logger.error(f"Error executing tool call: {e}")
+                            tool_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call_data['id'],
+                                "content": json.dumps({"success": False, "error": str(e)})
+                            })
 
-            # Send final graph update
-            yield {
-                'type': 'graph_update',
-                'graph_data': graph_data
-            }
+                # Send graph update after tools execute
+                yield {
+                    'type': 'graph_update',
+                    'graph_data': graph_data
+                }
+
+                # Continue the conversation with tool results
+                messages.append(assistant_message)
+                messages.extend(tool_messages)
+
+                # Stream the model's response to the tool execution
+                continuation_stream = await self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    stream=True,
+                    temperature=0.7,
+                )
+
+                async for chunk in continuation_stream:
+                    if chunk.choices and len(chunk.choices) > 0:
+                        delta = chunk.choices[0].delta
+                        if delta.content:
+                            yield {
+                                'type': 'token',
+                                'content': delta.content
+                            }
+            else:
+                # No tool calls, just send final graph update
+                yield {
+                    'type': 'graph_update',
+                    'graph_data': graph_data
+                }
 
         except Exception as e:
             logger.error(f"Streaming error: {e}")
