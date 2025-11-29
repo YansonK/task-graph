@@ -135,6 +135,7 @@ class Agent:
             class StreamingLM(dspy.LM):
                 def __init__(self, model, api_key, stream_queue):
                     super().__init__(model=model, api_key=api_key)
+                    self.api_key = api_key  # Store api_key as instance attribute
                     self.stream_queue = stream_queue
                     self.base_client = AsyncOpenAI(api_key=api_key)
 
