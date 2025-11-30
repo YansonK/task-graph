@@ -123,13 +123,15 @@ const Index = () => {
     setMessages(prev => [...prev, assistantMessage]);
 
     try {
-      // Convert messages to API format
-      const apiMessages = newMessages.map(msg => ({
-        id: msg.id,
-        type: msg.type,
-        content: msg.content,
-        timestamp: msg.timestamp.toISOString(),
-      }));
+      // Convert messages to API format (exclude thinking field and only send completed messages)
+      const apiMessages = newMessages
+        .filter(msg => !msg.isThinking && msg.content) // Only send non-thinking messages with content
+        .map(msg => ({
+          id: msg.id,
+          type: msg.type,
+          content: msg.content,
+          timestamp: msg.timestamp.toISOString(),
+        }));
 
       // Send streaming request
       await sendMessageStream(
