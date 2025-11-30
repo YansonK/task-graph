@@ -175,8 +175,7 @@ class Agent:
                     return '\n\n'.join(sections) if sections else None
 
                 def __call__(self, prompt=None, messages=None, **kwargs):
-                    """Override to capture and stream responses token-by-token"""
-                    # Use the parent's __call__ but intercept for streaming
+                    """Override to capture and stream responses"""
                     import openai
                     import re
 
@@ -187,11 +186,10 @@ class Agent:
                         messages = [{"role": "user", "content": prompt}]
 
                     # Detect if this is a thinking call or final response
-                    # ReAct makes multiple calls - early ones are thinking, last is response
                     prompt_text = str(prompt or messages)
                     is_thinking = 'next_thought' in prompt_text or 'Thought' in prompt_text or self.call_count == 1
 
-                    # Make streaming request to OpenAI directly
+                    # Make streaming request to OpenAI
                     client = openai.OpenAI(api_key=self.api_key)
                     stream = client.chat.completions.create(
                         model=self.model.replace('openai/', ''),
@@ -200,168 +198,61 @@ class Agent:
                         **kwargs
                     )
 
-                    # State machine for real-time token filtering
+                    # Collect full response while streaming from OpenAI
                     full_response = ""
-                    buffer = ""  # Buffer for detecting markers
-                    current_field = None  # Track which field we're in
-                    in_json_response = False  # Track if we're in a JSON response field
-
-                    # Markers to detect (longest is 30 chars)
-                    MAX_MARKER_LENGTH = 35
-                    THINKING_MARKERS = ['[[ ## next_thought ## ]]', '[[ ## next_tool_name ## ]]', '[[ ## next_tool_args ## ]]']
-                    RESPONSE_START = '[[ ## response ## ]]'
-                    RESPONSE_END = '[[ ## completed ## ]]'
-                    REASONING_MARKER = '[[ ## reasoning ## ]]'
-
-                    def could_be_partial_marker(text):
-                        """Check if text could be the start of a marker"""
-                        if not text or not text.startswith('['):
-                            return False
-                        # Check if it could be the start of any marker
-                        all_markers = THINKING_MARKERS + [RESPONSE_START, RESPONSE_END, REASONING_MARKER, '"response"']
-                        return any(marker.startswith(text) for marker in all_markers)
-
-                    # Stream tokens as they arrive
                     for chunk in stream:
                         if chunk.choices and len(chunk.choices) > 0:
                             delta = chunk.choices[0].delta
                             if delta.content:
-                                token = delta.content
-                                full_response += token
-                                buffer += token
+                                full_response += delta.content
 
-                                # Process buffer in a loop to handle multiple markers
-                                while buffer:
-                                    marker_found = False
-                                    content_to_send = None
-
-                                    # Check for thinking field markers
-                                    for marker in THINKING_MARKERS:
-                                        if marker in buffer:
-                                            # Send content before marker
-                                            parts = buffer.split(marker, 1)
-                                            if parts[0] and current_field:
-                                                content_to_send = parts[0]
-
-                                            # Update field and add header
-                                            if 'next_thought' in marker:
-                                                current_field = 'thinking'
-                                                if is_thinking:
-                                                    self.stream_queue.put(('thinking', '💭 '))
-                                            elif 'next_tool_name' in marker:
-                                                current_field = 'tool_name'
-                                                if is_thinking:
-                                                    self.stream_queue.put(('thinking', '\n\n🔧 Tool: '))
-                                            elif 'next_tool_args' in marker:
-                                                current_field = 'tool_args'
-                                                if is_thinking:
-                                                    self.stream_queue.put(('thinking', '\n\n📋 Args: '))
-
-                                            buffer = parts[1]
-                                            marker_found = True
-                                            break
-
-                                    # Check for response markers
-                                    if not marker_found and RESPONSE_START in buffer:
-                                        parts = buffer.split(RESPONSE_START, 1)
-                                        if parts[0] and current_field:
-                                            content_to_send = parts[0]
-                                        current_field = 'response'
-                                        buffer = parts[1]
-                                        marker_found = True
-
-                                    if not marker_found and RESPONSE_END in buffer:
-                                        parts = buffer.split(RESPONSE_END, 1)
-                                        if parts[0] and current_field == 'response':
-                                            content_to_send = parts[0]
-                                        current_field = None
-                                        buffer = parts[1]
-                                        marker_found = True
-
-                                    # Check for reasoning marker (skip it)
-                                    if not marker_found and REASONING_MARKER in buffer:
-                                        buffer = buffer.split(REASONING_MARKER, 1)[1]
-                                        marker_found = True
-
-                                    # Check for JSON response field
-                                    if not marker_found and not is_thinking and '"response"' in buffer and not in_json_response:
-                                        match = re.search(r'"response"\s*:\s*"', buffer)
-                                        if match:
-                                            in_json_response = True
-                                            buffer = buffer[match.end():]
-                                            current_field = 'response'
-                                            marker_found = True
-
-                                    # Send content before marker if any
-                                    if content_to_send:
-                                        content_to_send = content_to_send.strip()
-                                        if content_to_send:
-                                            if is_thinking and current_field in ['thinking', 'tool_name', 'tool_args']:
-                                                self.stream_queue.put(('thinking', content_to_send))
-                                            elif not is_thinking and current_field == 'response':
-                                                self.stream_queue.put(('token', content_to_send))
-
-                                    # If no marker found, decide what to send
-                                    if not marker_found:
-                                        # Keep small buffer to detect partial markers
-                                        if len(buffer) > MAX_MARKER_LENGTH:
-                                            # Check if end of buffer could be partial marker
-                                            send_up_to = len(buffer) - MAX_MARKER_LENGTH
-                                            # Find safe cutoff point
-                                            for i in range(len(buffer) - 1, send_up_to - 1, -1):
-                                                if could_be_partial_marker(buffer[i:]):
-                                                    send_up_to = i
-                                                    break
-
-                                            to_send = buffer[:send_up_to]
-                                            buffer = buffer[send_up_to:]
-
-                                            if to_send and current_field:
-                                                # Send to appropriate stream
-                                                if is_thinking and current_field in ['thinking', 'tool_name', 'tool_args']:
-                                                    self.stream_queue.put(('thinking', to_send))
-                                                elif not is_thinking and current_field == 'response':
-                                                    # Check for end quote in JSON responses
-                                                    if in_json_response and '"' in to_send:
-                                                        parts = to_send.split('"', 1)
-                                                        if parts[0]:
-                                                            self.stream_queue.put(('token', parts[0]))
-                                                        in_json_response = False
-                                                        buffer = '"' + parts[1] + buffer
-                                                    else:
-                                                        self.stream_queue.put(('token', to_send))
-
-                                        # Exit loop if no more processing needed
-                                        break
-
-                    # Flush remaining buffer
-                    if buffer and current_field:
-                        # Clean up the buffer
-                        cleaned = buffer.strip()
-
-                        # Remove closing markers/quotes
-                        if in_json_response and '"' in cleaned:
-                            cleaned = cleaned.split('"')[0]
-
-                        # Remove common suffixes
-                        for suffix in [RESPONSE_END, '"}', "'}}",  '}']:
-                            if cleaned.endswith(suffix):
-                                cleaned = cleaned[:-len(suffix)].strip()
-
-                        if cleaned:
-                            if is_thinking and current_field in ['thinking', 'tool_name', 'tool_args']:
-                                self.stream_queue.put(('thinking', cleaned))
-                            elif current_field == 'response':
-                                self.stream_queue.put(('token', cleaned))
-
-                    # Log the complete response for debugging
-                    logger.info(f"=== LM Call {self.call_count} Complete ===")
-                    logger.info(f"Is Thinking: {is_thinking}, Field: {current_field}")
+                    logger.info(f"=== LM Call {self.call_count} ===")
+                    logger.info(f"Is Thinking: {is_thinking}")
                     logger.info(f"Response Length: {len(full_response)} chars")
                     logger.info(f"Response: {full_response[:300]}...")
                     logger.info("=" * 50)
 
-                    # Return in format DSPy expects
+                    # Helper to stream text smoothly
+                    def stream_smoothly(text, msg_type, chunk_size=3):
+                        """Stream text in small chunks for smooth output"""
+                        if not text:
+                            return
+                        for i in range(0, len(text), chunk_size):
+                            self.stream_queue.put((msg_type, text[i:i + chunk_size]))
+
+                    # Process and stream based on type
+                    if is_thinking:
+                        # Parse thinking content
+                        formatted = self.parse_thinking_content(full_response)
+                        if formatted:
+                            stream_smoothly(formatted, 'thinking')
+                    else:
+                        # Extract clean response text
+                        extracted = None
+
+                        # Strategy 1: Extract from [[ ## response ## ]] markers
+                        if '[[ ## response ## ]]' in full_response:
+                            match = re.search(r'\[\[ ## response ## \]\](.*?)(?:\[\[ ## completed ## \]\]|$)', full_response, re.DOTALL)
+                            if match:
+                                extracted = match.group(1).strip()
+                                logger.info(f"Extracted via markers: {extracted[:100]}...")
+
+                        # Strategy 2: Extract from JSON format
+                        if not extracted:
+                            json_match = re.search(r'"response"\s*:\s*"([^"]+)"', full_response)
+                            if json_match:
+                                extracted = json_match.group(1)
+                                logger.info(f"Extracted via JSON: {extracted[:100]}...")
+
+                        # Strategy 3: Use full response as fallback
+                        if not extracted:
+                            extracted = full_response
+                            logger.info(f"Using full response: {extracted[:100]}...")
+
+                        # Stream the clean response
+                        stream_smoothly(extracted, 'token')
+
+                    # Return original response for DSPy
                     return [full_response]
 
             # Run ReAct agent in background thread with streaming LM
