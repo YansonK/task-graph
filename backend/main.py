@@ -85,7 +85,6 @@ async def generate_streaming_response(chat_history: List[Message], graph_data: G
     async for chunk in agent.query_stream(messages, graph):
         # Yield each chunk as Server-Sent Event
         yield f"data: {json.dumps(chunk)}\n\n"
-        await asyncio.sleep(0)  # Allow other tasks to run
 
     # Send done signal
     yield f"data: {json.dumps({'type': 'done'})}\n\n"

@@ -214,14 +214,20 @@ class Agent:
                     logger.info(f"Response Preview: {full_response[:200]}...")
                     logger.info("=" * 50)
 
+                    # Helper function to stream text in chunks
+                    def stream_in_chunks(text, msg_type, chunk_size=8):
+                        """Stream text in small chunks for smoother output"""
+                        for i in range(0, len(text), chunk_size):
+                            chunk = text[i:i + chunk_size]
+                            self.stream_queue.put((msg_type, chunk))
+
                     # Process the complete response based on type
                     if is_thinking:
                         # Parse and format thinking content
                         formatted_thinking = self.parse_thinking_content(full_response)
                         if formatted_thinking:
-                            # Stream thinking character by character for smooth effect
-                            for char in formatted_thinking:
-                                self.stream_queue.put(('thinking', char))
+                            # Stream thinking in chunks for smoother effect
+                            stream_in_chunks(formatted_thinking, 'thinking')
                     else:
                         # Extract the response field from JSON if present
                         import re
@@ -259,9 +265,8 @@ class Agent:
                             extracted = full_response
                             logger.info(f"Using full response (no extraction): {extracted}")
 
-                        # Stream the extracted response character by character
-                        for char in extracted:
-                            self.stream_queue.put(('token', char))
+                        # Stream the extracted response in chunks
+                        stream_in_chunks(extracted, 'token')
 
                         # IMPORTANT: Return the ORIGINAL full_response to DSPy
                         # DSPy expects the original format with markers/JSON
@@ -301,8 +306,8 @@ class Agent:
             # Stream tokens from queue as they arrive
             while not agent_done.is_set() or not stream_queue.empty():
                 try:
-                    # Try to get tokens from queue
-                    msg_type, content = stream_queue.get(timeout=0.1)
+                    # Try to get tokens from queue with shorter timeout for responsiveness
+                    msg_type, content = stream_queue.get(timeout=0.02)
                     if msg_type == 'token':
                         yield {
                             'type': 'token',
@@ -319,8 +324,8 @@ class Agent:
                             'content': content
                         }
                 except queue.Empty:
-                    # No tokens available, continue waiting
-                    await asyncio.sleep(0.01)
+                    # No tokens available, minimal wait before checking again
+                    await asyncio.sleep(0.001)
 
             # Wait for thread to complete
             agent_thread.join()
