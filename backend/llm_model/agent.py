@@ -140,6 +140,40 @@ class Agent:
                     self.base_client = AsyncOpenAI(api_key=api_key)
                     self.call_count = 0  # Track which LM call we're on
 
+                def parse_thinking_content(self, text):
+                    """Parse thinking text and strip headers, return formatted content"""
+                    import re
+
+                    # Remove header markers and format content
+                    sections = []
+
+                    # Extract next_thought
+                    thought_match = re.search(r'\[\[ ## next_thought ## \]\](.*?)(?=\[\[|$)', text, re.DOTALL)
+                    if thought_match:
+                        thought = thought_match.group(1).strip()
+                        if thought:
+                            sections.append(f"💭 {thought}")
+
+                    # Extract next_tool_name
+                    tool_match = re.search(r'\[\[ ## next_tool_name ## \]\](.*?)(?=\[\[|$)', text, re.DOTALL)
+                    if tool_match:
+                        tool = tool_match.group(1).strip().strip("'\"")
+                        if tool and tool != 'finish':
+                            sections.append(f"🔧 Tool: {tool}")
+
+                    # Extract next_tool_args
+                    args_match = re.search(r'\[\[ ## next_tool_args ## \]\](.*?)(?=\[\[|$)', text, re.DOTALL)
+                    if args_match:
+                        args = args_match.group(1).strip()
+                        if args and args != '{}':
+                            try:
+                                args_obj = json.loads(args)
+                                sections.append(f"📋 Args: {json.dumps(args_obj, indent=2)}")
+                            except:
+                                sections.append(f"📋 Args: {args}")
+
+                    return '\n\n'.join(sections) if sections else None
+
                 def __call__(self, prompt=None, messages=None, **kwargs):
                     """Override to capture and stream responses"""
                     # Use the parent's __call__ but intercept for streaming
@@ -172,20 +206,38 @@ class Agent:
                             delta = chunk.choices[0].delta
                             if delta.content:
                                 full_response += delta.content
-                                # Send to queue with appropriate type
-                                msg_type = 'thinking' if is_thinking else 'token'
-                                self.stream_queue.put((msg_type, delta.content))
 
-                    # If this is the final response, extract only content between markers
-                    if not is_thinking and '[[ ## response ## ]]' in full_response:
-                        # Extract content between response markers
+                    # Process the complete response based on type
+                    if is_thinking:
+                        # Parse and format thinking content
+                        formatted_thinking = self.parse_thinking_content(full_response)
+                        if formatted_thinking:
+                            self.stream_queue.put(('thinking', formatted_thinking))
+                    else:
+                        # Extract the response field from JSON if present
                         import re
-                        match = re.search(r'\[\[ ## response ## \]\](.*?)\[\[ ## completed ## \]\]', full_response, re.DOTALL)
-                        if match:
-                            extracted_response = match.group(1).strip()
-                            # Send a special marker to clear previous content and replace with extracted
-                            self.stream_queue.put(('replace_response', extracted_response))
-                            full_response = extracted_response
+
+                        # First try to extract from JSON format
+                        json_match = re.search(r'\{[^}]*"response"\s*:\s*"([^"]*)"[^}]*\}', full_response, re.DOTALL)
+                        if json_match:
+                            extracted = json_match.group(1)
+                            self.stream_queue.put(('replace_response', extracted))
+                            full_response = extracted
+                        elif '[[ ## response ## ]]' in full_response:
+                            # Extract content between response markers
+                            match = re.search(r'\[\[ ## response ## \]\](.*?)(?:\[\[ ## completed ## \]\]|$)', full_response, re.DOTALL)
+                            if match:
+                                extracted = match.group(1).strip()
+                                # Try to extract from JSON within the response
+                                inner_json = re.search(r'\{[^}]*"response"\s*:\s*"([^"]*)"[^}]*\}', extracted, re.DOTALL)
+                                if inner_json:
+                                    extracted = inner_json.group(1)
+                                self.stream_queue.put(('replace_response', extracted))
+                                full_response = extracted
+                        else:
+                            # No special formatting, stream as-is token by token
+                            for i, char in enumerate(full_response):
+                                self.stream_queue.put(('token', char))
 
                     # Return in format DSPy expects
                     return [full_response]
