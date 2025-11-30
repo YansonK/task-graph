@@ -175,9 +175,10 @@ class Agent:
                     return '\n\n'.join(sections) if sections else None
 
                 def __call__(self, prompt=None, messages=None, **kwargs):
-                    """Override to capture and stream responses"""
+                    """Override to capture and stream responses token-by-token"""
                     # Use the parent's __call__ but intercept for streaming
                     import openai
+                    import re
 
                     self.call_count += 1
 
@@ -199,13 +200,119 @@ class Agent:
                         **kwargs
                     )
 
-                    # Collect response while streaming
+                    # State machine for real-time token filtering
                     full_response = ""
+                    buffer = ""  # Buffer for detecting markers
+                    current_field = None  # Track which field we're in
+                    in_json_response = False  # Track if we're in a JSON response field
+
+                    # Markers to detect
+                    THINKING_MARKERS = ['[[ ## next_thought ## ]]', '[[ ## next_tool_name ## ]]', '[[ ## next_tool_args ## ]]']
+                    RESPONSE_START = '[[ ## response ## ]]'
+                    RESPONSE_END = '[[ ## completed ## ]]'
+
+                    # Stream tokens as they arrive
                     for chunk in stream:
                         if chunk.choices and len(chunk.choices) > 0:
                             delta = chunk.choices[0].delta
                             if delta.content:
-                                full_response += delta.content
+                                token = delta.content
+                                full_response += token
+                                buffer += token
+
+                                # Check for marker transitions in buffer
+                                marker_found = False
+
+                                # Check for thinking field markers
+                                for marker in THINKING_MARKERS:
+                                    if marker in buffer:
+                                        # Extract field name
+                                        if 'next_thought' in marker:
+                                            current_field = 'thinking'
+                                            # Send emoji header for thinking
+                                            if is_thinking and current_field == 'thinking':
+                                                self.stream_queue.put(('thinking', '💭 '))
+                                        elif 'next_tool_name' in marker:
+                                            current_field = 'tool_name'
+                                            if is_thinking:
+                                                self.stream_queue.put(('thinking', '\n\n🔧 Tool: '))
+                                        elif 'next_tool_args' in marker:
+                                            current_field = 'tool_args'
+                                            if is_thinking:
+                                                self.stream_queue.put(('thinking', '\n\n📋 Args: '))
+
+                                        # Remove marker from buffer
+                                        buffer = buffer.split(marker, 1)[1]
+                                        marker_found = True
+                                        break
+
+                                # Check for response markers
+                                if RESPONSE_START in buffer:
+                                    current_field = 'response'
+                                    buffer = buffer.split(RESPONSE_START, 1)[1]
+                                    marker_found = True
+                                elif RESPONSE_END in buffer:
+                                    current_field = None
+                                    buffer = ""
+                                    marker_found = True
+
+                                # Check if we're entering a JSON response field
+                                if not is_thinking and '"response"' in buffer and not in_json_response:
+                                    # Look for the start of the response value
+                                    match = re.search(r'"response"\s*:\s*"', buffer)
+                                    if match:
+                                        in_json_response = True
+                                        buffer = buffer[match.end():]
+                                        current_field = 'response'
+                                        marker_found = True
+
+                                # If no marker found, stream the content
+                                if not marker_found and buffer:
+                                    # Determine how much of buffer to send
+                                    # Keep last 50 chars in buffer to detect markers
+                                    if len(buffer) > 50:
+                                        to_send = buffer[:-50]
+                                        buffer = buffer[-50:]
+
+                                        # Send to appropriate stream based on current field
+                                        if is_thinking and current_field in ['thinking', 'tool_name', 'tool_args']:
+                                            # Clean up tool args formatting
+                                            if current_field == 'tool_args':
+                                                to_send = to_send.strip("'\"")
+                                            self.stream_queue.put(('thinking', to_send))
+                                        elif not is_thinking and current_field == 'response':
+                                            # For JSON responses, stop at closing quote
+                                            if in_json_response and '"' in to_send:
+                                                # Send up to the quote
+                                                parts = to_send.split('"', 1)
+                                                if parts[0]:
+                                                    self.stream_queue.put(('token', parts[0]))
+                                                in_json_response = False
+                                                buffer = '"' + parts[1] + buffer
+                                            else:
+                                                self.stream_queue.put(('token', to_send))
+
+                    # Flush remaining buffer
+                    if buffer and current_field:
+                        # Clean up the buffer
+                        cleaned = buffer.strip()
+
+                        # Remove closing markers/quotes
+                        if in_json_response and '"' in cleaned:
+                            cleaned = cleaned.split('"')[0]
+
+                        # Remove common suffixes
+                        for suffix in [RESPONSE_END, '"}', "'}}"]:
+                            if cleaned.endswith(suffix):
+                                cleaned = cleaned[:-len(suffix)]
+
+                        if cleaned:
+                            if is_thinking and current_field in ['thinking', 'tool_name', 'tool_args']:
+                                if current_field == 'tool_args':
+                                    cleaned = cleaned.strip("'\"")
+                                self.stream_queue.put(('thinking', cleaned))
+                            elif not is_thinking and current_field == 'response':
+                                self.stream_queue.put(('token', cleaned))
 
                     # Log the complete response for debugging
                     logger.info(f"=== LM Call {self.call_count} Complete Response ===")
@@ -213,64 +320,6 @@ class Agent:
                     logger.info(f"Response Length: {len(full_response)} chars")
                     logger.info(f"Response Preview: {full_response[:200]}...")
                     logger.info("=" * 50)
-
-                    # Helper function to stream text in chunks
-                    def stream_in_chunks(text, msg_type, chunk_size=8):
-                        """Stream text in small chunks for smoother output"""
-                        for i in range(0, len(text), chunk_size):
-                            chunk = text[i:i + chunk_size]
-                            self.stream_queue.put((msg_type, chunk))
-
-                    # Process the complete response based on type
-                    if is_thinking:
-                        # Parse and format thinking content
-                        formatted_thinking = self.parse_thinking_content(full_response)
-                        if formatted_thinking:
-                            # Stream thinking in chunks for smoother effect
-                            stream_in_chunks(formatted_thinking, 'thinking')
-                    else:
-                        # Extract the response field from JSON if present
-                        import re
-
-                        # Log the full response for debugging
-                        logger.info(f"=== Final Response Parsing ===")
-                        logger.info(f"Full response: {full_response}")
-                        logger.info("=" * 50)
-
-                        # Try multiple extraction strategies
-                        extracted = None
-
-                        # Strategy 1: Extract from JSON object at the end
-                        json_match = re.search(r'\{[^{}]*"response"\s*:\s*"([^"]+)"[^{}]*\}\s*$', full_response, re.DOTALL)
-                        if json_match:
-                            extracted = json_match.group(1)
-                            logger.info(f"Extracted via Strategy 1 (JSON at end): {extracted}")
-
-                        # Strategy 2: Look for JSON anywhere in response
-                        if not extracted:
-                            json_match = re.search(r'\{[^{}]*"response"\s*:\s*"([^"]+)"[^{}]*\}', full_response, re.DOTALL)
-                            if json_match:
-                                extracted = json_match.group(1)
-                                logger.info(f"Extracted via Strategy 2 (JSON in response): {extracted}")
-
-                        # Strategy 3: Extract from response markers
-                        if not extracted and '[[ ## response ## ]]' in full_response:
-                            match = re.search(r'\[\[ ## response ## \]\](.*?)(?:\[\[ ## completed ## \]\]|$)', full_response, re.DOTALL)
-                            if match:
-                                extracted = match.group(1).strip()
-                                logger.info(f"Extracted via Strategy 3 (markers): {extracted}")
-
-                        # Strategy 4: Use the full response as-is if no extraction worked
-                        if not extracted:
-                            extracted = full_response
-                            logger.info(f"Using full response (no extraction): {extracted}")
-
-                        # Stream the extracted response in chunks
-                        stream_in_chunks(extracted, 'token')
-
-                        # IMPORTANT: Return the ORIGINAL full_response to DSPy
-                        # DSPy expects the original format with markers/JSON
-                        # We've already sent the clean version to the queue above
 
                     # Return in format DSPy expects
                     return [full_response]
