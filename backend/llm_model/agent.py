@@ -207,37 +207,69 @@ class Agent:
                             if delta.content:
                                 full_response += delta.content
 
+                    # Log the complete response for debugging
+                    logger.info(f"=== LM Call {self.call_count} Complete Response ===")
+                    logger.info(f"Is Thinking: {is_thinking}")
+                    logger.info(f"Response Length: {len(full_response)} chars")
+                    logger.info(f"Response Preview: {full_response[:200]}...")
+                    logger.info("=" * 50)
+
                     # Process the complete response based on type
                     if is_thinking:
                         # Parse and format thinking content
                         formatted_thinking = self.parse_thinking_content(full_response)
                         if formatted_thinking:
-                            self.stream_queue.put(('thinking', formatted_thinking))
+                            # Stream thinking character by character for smooth effect
+                            for char in formatted_thinking:
+                                self.stream_queue.put(('thinking', char))
                     else:
                         # Extract the response field from JSON if present
                         import re
 
-                        # First try to extract from JSON format
-                        json_match = re.search(r'\{[^}]*"response"\s*:\s*"([^"]*)"[^}]*\}', full_response, re.DOTALL)
+                        # Log the full response for debugging
+                        logger.info(f"=== Final Response Parsing ===")
+                        logger.info(f"Full response: {full_response}")
+                        logger.info("=" * 50)
+
+                        # Try multiple extraction strategies
+                        extracted = None
+
+                        # Strategy 1: Extract from JSON object at the end
+                        json_match = re.search(r'\{[^{}]*"response"\s*:\s*"([^"]+)"[^{}]*\}\s*$', full_response, re.DOTALL)
                         if json_match:
                             extracted = json_match.group(1)
-                            self.stream_queue.put(('replace_response', extracted))
-                            full_response = extracted
-                        elif '[[ ## response ## ]]' in full_response:
-                            # Extract content between response markers
+                            logger.info(f"Extracted via Strategy 1 (JSON at end): {extracted}")
+
+                        # Strategy 2: Look for JSON anywhere in response
+                        if not extracted:
+                            json_match = re.search(r'\{[^{}]*"response"\s*:\s*"([^"]+)"[^{}]*\}', full_response, re.DOTALL)
+                            if json_match:
+                                # Get everything before the JSON as well
+                                json_start = full_response.find('{')
+                                text_before = full_response[:json_start].strip()
+                                json_response = json_match.group(1)
+                                # Prefer the JSON response, but include text before if substantial
+                                if text_before and len(text_before) > 10:
+                                    extracted = json_response  # Use JSON response
+                                else:
+                                    extracted = json_response
+                                logger.info(f"Extracted via Strategy 2 (JSON in response): {extracted}")
+
+                        # Strategy 3: Extract from response markers
+                        if not extracted and '[[ ## response ## ]]' in full_response:
                             match = re.search(r'\[\[ ## response ## \]\](.*?)(?:\[\[ ## completed ## \]\]|$)', full_response, re.DOTALL)
                             if match:
                                 extracted = match.group(1).strip()
-                                # Try to extract from JSON within the response
-                                inner_json = re.search(r'\{[^}]*"response"\s*:\s*"([^"]*)"[^}]*\}', extracted, re.DOTALL)
-                                if inner_json:
-                                    extracted = inner_json.group(1)
-                                self.stream_queue.put(('replace_response', extracted))
-                                full_response = extracted
-                        else:
-                            # No special formatting, stream as-is token by token
-                            for i, char in enumerate(full_response):
-                                self.stream_queue.put(('token', char))
+                                logger.info(f"Extracted via Strategy 3 (markers): {extracted}")
+
+                        # Strategy 4: Use the full response as-is if no extraction worked
+                        if not extracted:
+                            extracted = full_response
+                            logger.info(f"Using full response (no extraction): {extracted}")
+
+                        # Send the extracted response
+                        self.stream_queue.put(('replace_response', extracted))
+                        full_response = extracted
 
                     # Return in format DSPy expects
                     return [full_response]
