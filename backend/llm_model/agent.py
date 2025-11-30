@@ -244,15 +244,7 @@ class Agent:
                         if not extracted:
                             json_match = re.search(r'\{[^{}]*"response"\s*:\s*"([^"]+)"[^{}]*\}', full_response, re.DOTALL)
                             if json_match:
-                                # Get everything before the JSON as well
-                                json_start = full_response.find('{')
-                                text_before = full_response[:json_start].strip()
-                                json_response = json_match.group(1)
-                                # Prefer the JSON response, but include text before if substantial
-                                if text_before and len(text_before) > 10:
-                                    extracted = json_response  # Use JSON response
-                                else:
-                                    extracted = json_response
+                                extracted = json_match.group(1)
                                 logger.info(f"Extracted via Strategy 2 (JSON in response): {extracted}")
 
                         # Strategy 3: Extract from response markers
@@ -267,9 +259,13 @@ class Agent:
                             extracted = full_response
                             logger.info(f"Using full response (no extraction): {extracted}")
 
-                        # Send the extracted response
-                        self.stream_queue.put(('replace_response', extracted))
-                        full_response = extracted
+                        # Stream the extracted response character by character
+                        for char in extracted:
+                            self.stream_queue.put(('token', char))
+
+                        # IMPORTANT: Return the ORIGINAL full_response to DSPy
+                        # DSPy expects the original format with markers/JSON
+                        # We've already sent the clean version to the queue above
 
                     # Return in format DSPy expects
                     return [full_response]

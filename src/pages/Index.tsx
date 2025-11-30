@@ -159,16 +159,6 @@ const Index = () => {
             )
           );
         },
-        // onReplaceResponse: Replace the entire response content
-        (content: string) => {
-          setMessages(prev =>
-            prev.map(msg =>
-              msg.id === assistantMessageId
-                ? { ...msg, content: content, isThinking: false }
-                : msg
-            )
-          );
-        },
         // onGraphUpdate: Update the graph data
         (updatedGraph: APIGraphData) => {
           console.log("Graph data updated:", updatedGraph);
