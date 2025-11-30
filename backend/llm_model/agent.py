@@ -368,6 +368,69 @@ class Agent:
 
                         logger.info(f"Created task node: {node['name']}")
 
+                    elif result.trajectory[current_tool] == "edit_task_node":
+                        # Edit an existing task node
+                        edit_data = result.trajectory[tool_result]
+
+                        # Check if this is an error message
+                        if isinstance(edit_data, str) and ("error" in edit_data.lower() or "execution error" in edit_data.lower()):
+                            logger.error(f"Tool execution failed: {edit_data}")
+                            break
+
+                        # Parse if it's a string (JSON or dict representation)
+                        if isinstance(edit_data, str):
+                            try:
+                                edit_info = json.loads(edit_data)
+                            except json.JSONDecodeError:
+                                # Try eval as fallback (for dict string representation)
+                                try:
+                                    import ast
+                                    edit_info = ast.literal_eval(edit_data)
+                                except (SyntaxError, ValueError) as e:
+                                    logger.error(f"Failed to parse edit data: {edit_data}. Error: {e}")
+                                    break
+                        else:
+                            edit_info = edit_data
+
+                        # Validate edit has required fields
+                        if not isinstance(edit_info, dict) or "id" not in edit_info:
+                            logger.error(f"Invalid edit data: {edit_info}")
+                            break
+
+                        # Find the node to edit
+                        node_to_edit = None
+                        for node in graph_data["nodes"]:
+                            if node["id"] == edit_info["id"]:
+                                node_to_edit = node
+                                break
+
+                        if not node_to_edit:
+                            logger.error(f"Node not found for editing: {edit_info['id']}")
+                            break
+
+                        # Update node fields if provided
+                        if "name" in edit_info:
+                            node_to_edit["name"] = edit_info["name"]
+                        if "description" in edit_info:
+                            node_to_edit["description"] = edit_info["description"]
+
+                        # Handle parent_id change if provided
+                        if "parent_id" in edit_info:
+                            # Remove any existing links where this node is the target
+                            graph_data["links"] = [
+                                link for link in graph_data["links"]
+                                if link["target"] != edit_info["id"]
+                            ]
+
+                            # Add new parent link if parent_id is not None
+                            if edit_info["parent_id"]:
+                                graph_data["links"].append({
+                                    "source": edit_info["parent_id"],
+                                    "target": edit_info["id"]
+                                })
+
+                        logger.info(f"Edited task node: {node_to_edit['name']}")
+
             # Send final graph update
             yield {
                 'type': 'graph_update',

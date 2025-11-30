@@ -17,6 +17,30 @@ def create_task_node(task_name: str, task_description: str, parent_id: Optional[
         "parent_id": parent_id
     }
 
+def edit_task_node(node_id: str, name: Optional[str] = None, description: Optional[str] = None, parent_id: Optional[str] = None) -> dict:
+    """Edit an existing task node's name, description, or parent_id.
+
+    Args:
+        node_id: The ID of the node to edit (required)
+        name: New name for the node (optional)
+        description: New description for the node (optional)
+        parent_id: New parent ID for the node (optional, use "null" to remove parent)
+
+    Returns:
+        Dictionary with the node_id and updated fields
+    """
+    result = {"id": node_id, "edit": True}
+
+    if name is not None:
+        result["name"] = name
+    if description is not None:
+        result["description"] = description
+    if parent_id is not None:
+        # Allow "null" string to explicitly remove parent
+        result["parent_id"] = None if parent_id == "null" else parent_id
+
+    return result
+
 def finish():
     """Conclude the trajectory."""
     return "Finish"
@@ -24,6 +48,7 @@ def finish():
 # Tools dictionary
 tools = {
     "create_task_node": dspy.Tool(create_task_node),
+    "edit_task_node": dspy.Tool(edit_task_node),
     "finish": dspy.Tool(finish)  # To allow the agent to finish
 }
 
