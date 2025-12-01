@@ -57,6 +57,22 @@ class Link(BaseModel):
     source: str
     target: str
 
+    @classmethod
+    def model_validate(cls, value):
+        """Custom validation to handle both string IDs and node objects."""
+        if isinstance(value, dict):
+            # Extract IDs from node objects if needed
+            source = value.get('source')
+            target = value.get('target')
+
+            # If source/target are objects with 'id' field, extract the ID
+            if isinstance(source, dict) and 'id' in source:
+                value['source'] = source['id']
+            if isinstance(target, dict) and 'id' in target:
+                value['target'] = target['id']
+
+        return super().model_validate(value)
+
 class GraphData(BaseModel):
     model_config = ConfigDict(extra='allow')
 
