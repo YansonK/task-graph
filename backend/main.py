@@ -2,8 +2,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, ConfigDict
-from typing import List, Dict, Any, Optional
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from typing import List, Dict, Any, Optional, Union
 import json
 import asyncio
 import logging
@@ -54,24 +54,16 @@ class Node(BaseModel):
 class Link(BaseModel):
     model_config = ConfigDict(extra='allow')
 
-    source: str
-    target: str
+    source: Union[str, Dict[str, Any]]
+    target: Union[str, Dict[str, Any]]
 
+    @field_validator('source', 'target', mode='before')
     @classmethod
-    def model_validate(cls, value):
-        """Custom validation to handle both string IDs and node objects."""
-        if isinstance(value, dict):
-            # Extract IDs from node objects if needed
-            source = value.get('source')
-            target = value.get('target')
-
-            # If source/target are objects with 'id' field, extract the ID
-            if isinstance(source, dict) and 'id' in source:
-                value['source'] = source['id']
-            if isinstance(target, dict) and 'id' in target:
-                value['target'] = target['id']
-
-        return super().model_validate(value)
+    def extract_id_from_node(cls, v):
+        """Extract ID from node object if it's a dict."""
+        if isinstance(v, dict) and 'id' in v:
+            return v['id']
+        return v
 
 class GraphData(BaseModel):
     model_config = ConfigDict(extra='allow')
