@@ -350,20 +350,32 @@ class Agent:
                             node = node_data
 
                         # Validate node has required fields
-                        if not isinstance(node, dict) or "id" not in node or "name" not in node:
+                        if not isinstance(node, dict) or "id" not in node or "name" not in node or "description" not in node:
                             logger.error(f"Invalid node data: {node}")
                             break
 
-                        if len(graph_data["nodes"]) > 0 and node.get("parent_id"):
+                        # Validate parent exists if parent_id is specified
+                        parent_id = node.get("parent_id")
+                        if parent_id:
+                            parent_exists = any(n["id"] == parent_id for n in graph_data["nodes"])
+                            if not parent_exists:
+                                logger.warning(f"Parent node {parent_id} not found for node {node['id']}, skipping link creation")
+                                parent_id = None
+
+                        # Create link if parent exists
+                        if parent_id:
                             graph_data["links"].append({
-                                "source": node["parent_id"],
+                                "source": parent_id,
                                 "target": node["id"]
                             })
+
+                        # Ensure description is not None
+                        description = node.get("description", "")
 
                         graph_data["nodes"].append({
                             "id": node["id"],
                             "name": node["name"],
-                            "description": node["description"]
+                            "description": description
                         })
 
                         logger.info(f"Created task node: {node['name']}")
@@ -408,11 +420,12 @@ class Agent:
                             logger.error(f"Node not found for editing: {edit_info['id']}")
                             break
 
-                        # Update node fields if provided
-                        if "name" in edit_info:
+                        # Update node fields if provided (with validation)
+                        if "name" in edit_info and edit_info["name"]:
                             node_to_edit["name"] = edit_info["name"]
                         if "description" in edit_info:
-                            node_to_edit["description"] = edit_info["description"]
+                            # Allow empty description but not None
+                            node_to_edit["description"] = edit_info["description"] if edit_info["description"] is not None else node_to_edit.get("description", "")
 
                         # Handle parent_id change if provided
                         if "parent_id" in edit_info:
@@ -423,11 +436,17 @@ class Agent:
                             ]
 
                             # Add new parent link if parent_id is not None
-                            if edit_info["parent_id"]:
-                                graph_data["links"].append({
-                                    "source": edit_info["parent_id"],
-                                    "target": edit_info["id"]
-                                })
+                            new_parent_id = edit_info["parent_id"]
+                            if new_parent_id:
+                                # Validate parent exists
+                                parent_exists = any(n["id"] == new_parent_id for n in graph_data["nodes"])
+                                if parent_exists:
+                                    graph_data["links"].append({
+                                        "source": new_parent_id,
+                                        "target": edit_info["id"]
+                                    })
+                                else:
+                                    logger.warning(f"Parent node {new_parent_id} not found, skipping link creation")
 
                         logger.info(f"Edited task node: {node_to_edit['name']}")
 
