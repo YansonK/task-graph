@@ -2,12 +2,12 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator
 from typing import List, Dict, Any, Optional, Union
 import json
-import asyncio
 import logging
 from llm_model.agent import Agent
+from llm_model.config import Config
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -27,7 +27,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # Configure CORS for local development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],  # Vite default port
+    allow_origins=Config.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -164,4 +164,4 @@ async def chat_stream(request: ChatRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=Config.API_HOST, port=Config.API_PORT)
