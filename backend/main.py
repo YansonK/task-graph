@@ -1,13 +1,28 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, ConfigDict
 from typing import List, Dict, Any, Optional
 import json
 import asyncio
+import logging
 from llm_model.agent import Agent
 
+# Set up logging
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="Task Graph API")
+
+# Add exception handler for validation errors
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error(f"Validation error: {exc.errors()}")
+    logger.error(f"Request body: {await request.body()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": str(exc.body)},
+    )
 
 # Configure CORS for local development
 app.add_middleware(
@@ -29,16 +44,22 @@ class Message(BaseModel):
     timestamp: str
 
 class Node(BaseModel):
+    model_config = ConfigDict(extra='allow')
+
     id: str
     name: str
     description: str
     status: Optional[str] = None
 
 class Link(BaseModel):
+    model_config = ConfigDict(extra='allow')
+
     source: str
     target: str
 
 class GraphData(BaseModel):
+    model_config = ConfigDict(extra='allow')
+
     nodes: List[Node]
     links: List[Link]
 
