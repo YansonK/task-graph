@@ -44,8 +44,7 @@ class Agent:
             self.react_agent,
             stream_listeners=[
                 dspy.streaming.StreamListener(
-                    signature_field_name="response",
-                    allow_reuse=True  # Allow streaming across ReAct iterations
+                    signature_field_name="response"
                 )
             ]
         )
