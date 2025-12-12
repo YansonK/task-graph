@@ -7,7 +7,12 @@ from typing import AsyncGenerator, Dict, Any
 import asyncio
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+# Use DEBUG level if DSPY_DEBUG env var is set, otherwise INFO
+log_level = logging.DEBUG if os.getenv('DSPY_DEBUG') else logging.INFO
+logging.basicConfig(
+    level=log_level,
+    format='%(levelname)s:%(name)s:%(message)s'
+)
 logger = logging.getLogger(__name__)
 
 max_iters = 5
@@ -61,9 +66,12 @@ class Agent:
             - {'type': 'graph_update', 'graph_data': dict} - Updated graph
         """
         try:
+            logger.debug("🚀 Starting query_stream")
             final_result = None
+            chunk_count = 0
 
             # Use DSPy's native streaming - async iteration over streamify output
+            logger.debug("📡 Beginning async iteration over streaming_agent")
             async for chunk in self.streaming_agent(
                 conversation_history=chat_history,
                 task_nodes=graph_data
@@ -71,6 +79,8 @@ class Agent:
                 # DSPy yields either StreamResponse (tokens) or Prediction (final result)
                 if isinstance(chunk, dspy.streaming.StreamResponse):
                     # Stream individual tokens as they arrive
+                    chunk_count += 1
+                    logger.debug(f"🔹 Token chunk #{chunk_count}: '{chunk.chunk[:50]}...'")
                     yield {
                         'type': 'token',
                         'content': chunk.chunk
@@ -78,20 +88,28 @@ class Agent:
                 elif isinstance(chunk, dspy.Prediction):
                     # This is the final result with all trajectory information
                     final_result = chunk
-                    logger.info(f"Received final prediction with {len(chunk.trajectory)} trajectory items")
+                    logger.info(f"✅ Received final prediction with {len(chunk.trajectory)} trajectory items")
+
+            logger.debug(f"🏁 Async iteration complete. Total chunks: {chunk_count}")
 
             # Process tool calls and update graph from the final result
             if final_result:
+                logger.debug("🔧 Processing graph updates...")
                 await self._process_graph_updates(final_result, graph_data)
+                logger.debug("✓ Graph updates processed")
+            else:
+                logger.warning("⚠️ No final result received from streaming")
 
             # Send final graph update
+            logger.debug("📤 Sending final graph update")
             yield {
                 'type': 'graph_update',
                 'graph_data': graph_data
             }
+            logger.debug("✓ Stream completed successfully")
 
         except Exception as e:
-            logger.error(f"Streaming error: {e}", exc_info=True)
+            logger.error(f"❌ Streaming error: {e}", exc_info=True)
             yield {
                 'type': 'token',
                 'content': f"Sorry, I encountered an error: {str(e)}"
@@ -105,17 +123,26 @@ class Agent:
             result: The final DSPy Prediction with trajectory
             graph_data: The graph data structure to update
         """
+        logger.debug(f"📋 Processing {max_iters} potential tool iterations")
         for i in range(max_iters):
             current_tool = f"tool_name_{i}"
             tool_result = f'observation_{i}'
 
             if current_tool not in result.trajectory:
+                logger.debug(f"🛑 No tool found at iteration {i}, stopping")
                 break
 
-            if result.trajectory[current_tool] == "create_task_node":
+            tool_name = result.trajectory[current_tool]
+            logger.debug(f"🔧 Iteration {i}: Processing tool '{tool_name}'")
+
+            if tool_name == "create_task_node":
                 await self._create_task_node(result.trajectory[tool_result], graph_data)
-            elif result.trajectory[current_tool] == "edit_task_node":
+            elif tool_name == "edit_task_node":
                 await self._edit_task_node(result.trajectory[tool_result], graph_data)
+            else:
+                logger.debug(f"⏭️  Skipping unknown tool: {tool_name}")
+
+        logger.debug(f"✅ Finished processing graph updates")
 
     async def _create_task_node(self, node_data: Any, graph_data: Dict[str, Any]) -> None:
         """Create a new task node in the graph."""
