@@ -290,3 +290,142 @@ class GraphOperations:
             "old_status": old_status,
             "new_status": new_status
         }
+
+    @staticmethod
+    def delete_task_node(
+        delete_data: Any,
+        graph_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Delete a task node from the graph.
+
+        When a node is deleted:
+        - If the node has a parent: all children are reconnected to the parent
+        - If the node has no parent (root): all descendants are cascade deleted
+
+        Args:
+            delete_data: Delete data (string or dict) with 'id'
+            graph_data: Current graph data (modified in place)
+
+        Returns:
+            Dictionary with deletion info or None if deletion failed
+        """
+        # Parse delete data
+        delete_info = GraphOperations.parse_tool_result(delete_data)
+        if delete_info is None:
+            return None
+
+        # Validate delete has required fields
+        if not isinstance(delete_info, dict) or "id" not in delete_info:
+            logger.error(f"Invalid delete data: {delete_info}")
+            return None
+
+        node_id = delete_info["id"]
+
+        # Find the node to delete
+        node_to_delete = None
+        for node in graph_data["nodes"]:
+            if node["id"] == node_id:
+                node_to_delete = node
+                break
+
+        if not node_to_delete:
+            logger.error(f"Node not found for deletion: {node_id}")
+            return None
+
+        # Find parent of the node to delete
+        parent_id = None
+        for link in graph_data["links"]:
+            if link["target"] == node_id:
+                parent_id = link["source"]
+                break
+
+        # Find all children of the node to delete
+        children_ids = [
+            link["target"] for link in graph_data["links"]
+            if link["source"] == node_id
+        ]
+
+        deleted_nodes = []
+
+        if parent_id:
+            # Case 1: Node has a parent - reconnect children to parent
+            # Remove all links involving this node
+            graph_data["links"] = [
+                link for link in graph_data["links"]
+                if link["source"] != node_id and link["target"] != node_id
+            ]
+
+            # Reconnect children to parent
+            for child_id in children_ids:
+                graph_data["links"].append({
+                    "source": parent_id,
+                    "target": child_id
+                })
+
+            # Remove the node
+            graph_data["nodes"] = [
+                node for node in graph_data["nodes"]
+                if node["id"] != node_id
+            ]
+
+            deleted_nodes.append(node_id)
+
+            logger.info(
+                f"🗑️  Deleted node: {node_to_delete['name']} "
+                f"(reconnected {len(children_ids)} children to parent)"
+            )
+        else:
+            # Case 2: Node has no parent (root) - cascade delete all descendants
+            def find_all_descendants(nid: str, visited: set = None) -> List[str]:
+                """Recursively find all descendant node IDs."""
+                if visited is None:
+                    visited = set()
+
+                if nid in visited:
+                    return []
+
+                visited.add(nid)
+                descendants = [nid]
+
+                # Find direct children
+                direct_children = [
+                    link["target"] for link in graph_data["links"]
+                    if link["source"] == nid
+                ]
+
+                # Recursively find descendants of children
+                for child_id in direct_children:
+                    descendants.extend(find_all_descendants(child_id, visited))
+
+                return descendants
+
+            # Find all nodes to delete (node + all descendants)
+            nodes_to_delete = find_all_descendants(node_id)
+            deleted_nodes.extend(nodes_to_delete)
+
+            # Remove all links involving any of these nodes
+            graph_data["links"] = [
+                link for link in graph_data["links"]
+                if link["source"] not in nodes_to_delete and link["target"] not in nodes_to_delete
+            ]
+
+            # Remove all the nodes
+            graph_data["nodes"] = [
+                node for node in graph_data["nodes"]
+                if node["id"] not in nodes_to_delete
+            ]
+
+            logger.info(
+                f"🗑️  Cascade deleted root node: {node_to_delete['name']} "
+                f"(deleted {len(nodes_to_delete)} total nodes)"
+            )
+
+        return {
+            "action": "delete",
+            "name": node_to_delete["name"],
+            "id": node_id,
+            "deleted_nodes": deleted_nodes,
+            "reconnected_children": len(children_ids) if parent_id else 0,
+            "cascade_deleted": len(deleted_nodes) if not parent_id else 0
+        }

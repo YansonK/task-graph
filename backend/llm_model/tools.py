@@ -56,6 +56,23 @@ def update_task_status(node_id: str, status: str) -> dict:
         "status": status
     }
 
+def delete_task_node(node_id: str) -> dict:
+    """Delete a task node from the graph.
+
+    When a node is deleted:
+    - If the node has a parent: all children are reconnected to the parent
+    - If the node has no parent (root): all descendants are cascade deleted
+
+    Args:
+        node_id: The ID of the node to delete (required)
+
+    Returns:
+        Dictionary with the node_id to delete
+    """
+    return {
+        "id": node_id
+    }
+
 def finish():
     """Conclude the trajectory."""
     return "Finish"
@@ -65,6 +82,7 @@ tools = {
     "create_task_node": dspy.Tool(create_task_node),
     "edit_task_node": dspy.Tool(edit_task_node),
     "update_task_status": dspy.Tool(update_task_status),
+    "delete_task_node": dspy.Tool(delete_task_node),
     "finish": dspy.Tool(finish)  # To allow the agent to finish
 }
 
