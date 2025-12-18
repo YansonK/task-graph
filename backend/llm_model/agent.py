@@ -21,11 +21,7 @@ from .streaming_lm import StreamingLM
 from .graph_operations import GraphOperations
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%H:%M:%S'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
@@ -60,8 +56,6 @@ class Agent:
 
         # Configure DSPy with OpenAI GPT-4o-mini
         dspy.configure(lm=dspy.LM('openai/gpt-4o-mini', api_key=api_key))
-
-        # Create base ReAct agent
         self.react_agent = dspy.ReAct(
             TaskBreakdownSignature,
             tools=list(tools.values()),
@@ -261,15 +255,12 @@ class Agent:
                     # No updates available, minimal wait before checking again
                     await asyncio.sleep(0.001)
 
-                elif isinstance(chunk, dspy.Prediction):
-                    # Log the completed thought if we accumulated any
-                    if current_thought:
-                        logger.info(f"💭 Thought: {current_thought}")
-                        current_thought = ""
+            # Wait for thread to complete
+            agent_thread.join()
 
-                    # This is the final result with all trajectory information
-                    final_result = chunk
-                    logger.info(f"✓ Completed reasoning")
+            # Check for errors
+            if 'error' in agent_error:
+                raise agent_error['error']
 
             # Send final graph update to ensure client has latest state
             logger.info("📤 Sending final graph update")
@@ -277,175 +268,12 @@ class Agent:
                 'type': 'graph_update',
                 'graph_data': graph_data
             }
-            logger.info("✅ Stream completed successfully")
 
             logger.info("✅ Stream completed successfully")
 
         except Exception as e:
-            logger.error(f"Streaming error: {e}", exc_info=True)
+            logger.error(f"Streaming error: {e}")
             yield {
                 'type': 'token',
                 'content': f"Sorry, I encountered an error: {str(e)}"
             }
-
-    async def _process_graph_updates(self, result: dspy.Prediction, graph_data: Dict[str, Any]) -> None:
-        """
-        Process tool calls from ReAct trajectory and update the graph.
-
-        Args:
-            result: The final DSPy Prediction with trajectory
-            graph_data: The graph data structure to update
-        """
-        for i in range(max_iters):
-            current_tool = f"tool_name_{i}"
-            tool_result = f'observation_{i}'
-
-            if current_tool not in result.trajectory:
-                break
-
-            if result.trajectory[current_tool] == "create_task_node":
-                await self._create_task_node(result.trajectory[tool_result], graph_data)
-            elif result.trajectory[current_tool] == "edit_task_node":
-                await self._edit_task_node(result.trajectory[tool_result], graph_data)
-
-    async def _create_task_node(self, node_data: Any, graph_data: Dict[str, Any]) -> None:
-        """Create a new task node in the graph."""
-        # Check if this is an error message
-        if isinstance(node_data, str) and ("error" in node_data.lower() or "execution error" in node_data.lower()):
-            logger.error(f"Tool execution failed: {node_data}")
-            return
-
-        # Parse if it's a string (JSON or dict representation)
-        node = self._parse_json_data(node_data, "node")
-        if not node:
-            return
-
-        # Validate node has required fields
-        if not isinstance(node, dict) or "id" not in node or "name" not in node or "description" not in node:
-            logger.error(f"Invalid node data: {node}")
-            return
-
-        # Validate parent exists if parent_id is specified
-        parent_id = node.get("parent_id")
-        if parent_id:
-            parent_exists = any(n["id"] == parent_id for n in graph_data["nodes"])
-            if not parent_exists:
-                logger.warning(f"Parent node {parent_id} not found for node {node['id']}, skipping link creation")
-                parent_id = None
-
-        # Create link if parent exists
-        if parent_id:
-            graph_data["links"].append({
-                "source": parent_id,
-                "target": node["id"]
-            })
-
-        # Ensure description is not None
-        description = node.get("description", "")
-
-        graph_data["nodes"].append({
-            "id": node["id"],
-            "name": node["name"],
-            "description": description
-        })
-
-        logger.info(f"📝 Created node: {node['name']}")
-
-    async def _edit_task_node(self, edit_data: Any, graph_data: Dict[str, Any]) -> None:
-        """Edit an existing task node in the graph."""
-        # Check if this is an error message
-        if isinstance(edit_data, str) and ("error" in edit_data.lower() or "execution error" in edit_data.lower()):
-            logger.error(f"Tool execution failed: {edit_data}")
-            return
-
-        # Parse if it's a string (JSON or dict representation)
-        edit_info = self._parse_json_data(edit_data, "edit")
-        if not edit_info:
-            return
-
-        # Validate edit has required fields
-        if not isinstance(edit_info, dict) or "id" not in edit_info:
-            logger.error(f"Invalid edit data: {edit_info}")
-            return
-
-        # Find the node to edit
-        node_to_edit = None
-        for node in graph_data["nodes"]:
-            if node["id"] == edit_info["id"]:
-                node_to_edit = node
-                break
-
-        if not node_to_edit:
-            logger.error(f"Node not found for editing: {edit_info['id']}")
-            return
-
-        # Update node fields if provided (with validation)
-        if "name" in edit_info and edit_info["name"]:
-            node_to_edit["name"] = edit_info["name"]
-        if "description" in edit_info:
-            # Allow empty description but not None
-            node_to_edit["description"] = edit_info["description"] if edit_info["description"] is not None else node_to_edit.get("description", "")
-
-        # Handle parent_id change if provided
-        if "parent_id" in edit_info:
-            # Remove any existing links where this node is the target
-            graph_data["links"] = [
-                link for link in graph_data["links"]
-                if link["target"] != edit_info["id"]
-            ]
-
-            # Add new parent link if parent_id is not None
-            new_parent_id = edit_info["parent_id"]
-            if new_parent_id:
-                # Validate parent exists
-                parent_exists = any(n["id"] == new_parent_id for n in graph_data["nodes"])
-                if parent_exists:
-                    graph_data["links"].append({
-                        "source": new_parent_id,
-                        "target": edit_info["id"]
-                    })
-                else:
-                    logger.warning(f"Parent node {new_parent_id} not found, skipping link creation")
-
-        logger.info(f"✏️  Edited node: {node_to_edit['name']}")
-
-    def _parse_json_data(self, data: Any, data_type: str) -> Any:
-        """
-        Parse JSON data that might be a string or already parsed.
-
-        Args:
-            data: The data to parse (string or dict)
-            data_type: Description of data type for logging
-
-        Returns:
-            Parsed data or None if parsing fails
-        """
-        if isinstance(data, str):
-            try:
-                return json.loads(data)
-            except json.JSONDecodeError:
-                # Try eval as fallback (for dict string representation)
-                try:
-                    import ast
-                    return ast.literal_eval(data)
-                except (SyntaxError, ValueError) as e:
-                    logger.error(f"Failed to parse {data_type} data: {data}. Error: {e}")
-                    return None
-        else:
-            return data
-
-    def query(self, chat_history, graph_data):
-        """
-        Non-streaming query method for backward compatibility.
-
-        Args:
-            chat_history: List of conversation messages
-            graph_data: Current graph data structure
-
-        Returns:
-            DSPy Prediction with response and trajectory
-        """
-        return self.react_agent(
-            conversation_history=chat_history,
-            task_nodes=graph_data
-        )
