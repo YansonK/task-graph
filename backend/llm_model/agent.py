@@ -113,6 +113,14 @@ class Agent:
             # Process tool calls and update graph from the final result
             if final_result:
                 await self._process_graph_updates(final_result, graph_data)
+
+                # Check if response was streamed, if not send it now from the prediction
+                if not current_response and hasattr(final_result, 'response') and final_result.response:
+                    logger.info(f"📝 Sending non-streamed response: {final_result.response[:100]}...")
+                    yield {
+                        'type': 'token',
+                        'content': final_result.response
+                    }
             else:
                 logger.warning("No final result received from streaming")
 
