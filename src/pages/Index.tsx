@@ -167,6 +167,13 @@ const Index = () => {
         // onDone: Streaming complete
         () => {
           console.log("Streaming complete");
+          setMessages(prev =>
+            prev.map(msg =>
+              msg.id === assistantMessageId
+                ? { ...msg, isThinking: false }
+                : msg
+            )
+          );
         }
       );
     } catch (error) {
