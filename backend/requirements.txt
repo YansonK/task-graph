@@ -5,13 +5,13 @@ python-multipart==0.0.20
 
 # AI/ML Libraries
 dspy-ai>=3.0.4
-openai==1.65.2
+openai==1.68.2
 langchain==0.3.20
 langchain-community==0.3.19
 langchain-core==0.3.41
 langchain-openai==0.3.7
 langchain-text-splitters==0.3.6
-litellm==1.62.1
+litellm==1.66.1
 
 # Data Processing
 pydantic==2.10.6
