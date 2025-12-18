@@ -53,8 +53,14 @@ class Agent:
         self.streaming_agent = dspy.streamify(
             self.react_agent,
             stream_listeners=[
-                dspy.streaming.StreamListener(signature_field_name="next_thought"),
-                dspy.streaming.StreamListener(signature_field_name="response")
+                dspy.streaming.StreamListener(
+                    signature_field_name="next_thought",
+                    allow_reuse=True
+                ),
+                dspy.streaming.StreamListener(
+                    signature_field_name="response",
+                    allow_reuse=True
+                )
             ]
         )
 
@@ -110,8 +116,7 @@ class Agent:
                 await self._process_graph_updates(final_result, graph_data)
 
                 # Check if response was streamed, if not send it now from the prediction
-                # Note: StreamListener in DSPy 2.6.10 doesn't support allow_reuse, so it only
-                # works once. After first use, we fallback to extracting from the prediction.
+                # Fallback for cases where DSPy doesn't stream the response field
                 if not response_was_streamed and hasattr(final_result, 'response') and final_result.response:
                     logger.info(f"📝 Sending non-streamed response: {final_result.response[:100]}...")
                     yield {
