@@ -101,6 +101,11 @@ class Agent:
                         logger.info(f"💭 Thought: {current_thought}")
                         current_thought = ""
 
+                    # Log the completed response
+                    if current_response:
+                        logger.info(f"💬 Response: {current_response[:100]}{'...' if len(current_response) > 100 else ''}")
+                        current_response = ""
+
                     # This is the final result with all trajectory information
                     final_result = chunk
                     logger.info(f"✓ Completed reasoning")
