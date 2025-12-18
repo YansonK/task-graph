@@ -72,7 +72,7 @@ class Agent:
         try:
             final_result = None
             current_thought = ""
-            current_response = ""
+            response_was_streamed = False
 
             # Use DSPy's native streaming - async iteration over streamify output
             async for chunk in self.streaming_agent(
@@ -88,7 +88,7 @@ class Agent:
                     if field == "next_thought":
                         current_thought += chunk.chunk
                     elif field == "response":
-                        current_response += chunk.chunk
+                        response_was_streamed = True
                         # Stream response tokens to the user
                         yield {
                             'type': 'token',
@@ -101,11 +101,6 @@ class Agent:
                         logger.info(f"💭 Thought: {current_thought}")
                         current_thought = ""
 
-                    # Log the completed response
-                    if current_response:
-                        logger.info(f"💬 Response: {current_response[:100]}{'...' if len(current_response) > 100 else ''}")
-                        current_response = ""
-
                     # This is the final result with all trajectory information
                     final_result = chunk
                     logger.info(f"✓ Completed reasoning")
@@ -115,12 +110,16 @@ class Agent:
                 await self._process_graph_updates(final_result, graph_data)
 
                 # Check if response was streamed, if not send it now from the prediction
-                if not current_response and hasattr(final_result, 'response') and final_result.response:
+                # Note: StreamListener in DSPy 2.6.10 doesn't support allow_reuse, so it only
+                # works once. After first use, we fallback to extracting from the prediction.
+                if not response_was_streamed and hasattr(final_result, 'response') and final_result.response:
                     logger.info(f"📝 Sending non-streamed response: {final_result.response[:100]}...")
                     yield {
                         'type': 'token',
                         'content': final_result.response
                     }
+                elif response_was_streamed:
+                    logger.info(f"✅ Response was streamed successfully")
             else:
                 logger.warning("No final result received from streaming")
 
