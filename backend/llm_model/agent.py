@@ -7,8 +7,18 @@ from typing import AsyncGenerator, Dict, Any
 import asyncio
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
 logger = logging.getLogger(__name__)
+
+# Silence noisy third-party loggers
+logging.getLogger('LiteLLM').setLevel(logging.WARNING)
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('openai').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
 
 max_iters = 5
 
@@ -39,13 +49,12 @@ class Agent:
         )
 
         # Create streaming version of the agent with StreamListener
-        # We stream the 'response' field which is the final output
+        # Stream both thinking and response for full transparency
         self.streaming_agent = dspy.streamify(
             self.react_agent,
             stream_listeners=[
-                dspy.streaming.StreamListener(
-                    signature_field_name="response"
-                )
+                dspy.streaming.StreamListener(signature_field_name="next_thought"),
+                dspy.streaming.StreamListener(signature_field_name="response")
             ]
         )
 
@@ -62,6 +71,8 @@ class Agent:
         """
         try:
             final_result = None
+            current_thought = ""
+            current_response = ""
 
             # Use DSPy's native streaming - async iteration over streamify output
             async for chunk in self.streaming_agent(
@@ -70,15 +81,29 @@ class Agent:
             ):
                 # DSPy yields either StreamResponse (tokens) or Prediction (final result)
                 if isinstance(chunk, dspy.streaming.StreamResponse):
-                    # Stream individual tokens as they arrive
-                    yield {
-                        'type': 'token',
-                        'content': chunk.chunk
-                    }
+                    # Track what field is being streamed
+                    field = chunk.signature_field_name
+
+                    # Accumulate for logging
+                    if field == "next_thought":
+                        current_thought += chunk.chunk
+                    elif field == "response":
+                        current_response += chunk.chunk
+                        # Stream response tokens to the user
+                        yield {
+                            'type': 'token',
+                            'content': chunk.chunk
+                        }
+
                 elif isinstance(chunk, dspy.Prediction):
+                    # Log the completed thought if we accumulated any
+                    if current_thought:
+                        logger.info(f"💭 Thought: {current_thought}")
+                        current_thought = ""
+
                     # This is the final result with all trajectory information
                     final_result = chunk
-                    logger.info(f"Received final prediction with {len(chunk.trajectory)} trajectory items")
+                    logger.info(f"✓ Completed reasoning")
 
             # Process tool calls and update graph from the final result
             if final_result:
@@ -160,7 +185,7 @@ class Agent:
             "description": description
         })
 
-        logger.info(f"Created task node: {node['name']}")
+        logger.info(f"📝 Created node: {node['name']}")
 
     async def _edit_task_node(self, edit_data: Any, graph_data: Dict[str, Any]) -> None:
         """Edit an existing task node in the graph."""
@@ -218,7 +243,7 @@ class Agent:
                 else:
                     logger.warning(f"Parent node {new_parent_id} not found, skipping link creation")
 
-        logger.info(f"Edited task node: {node_to_edit['name']}")
+        logger.info(f"✏️  Edited node: {node_to_edit['name']}")
 
     def _parse_json_data(self, data: Any, data_type: str) -> Any:
         """
