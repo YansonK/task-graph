@@ -137,7 +137,8 @@ class GraphOperations:
         graph_data["nodes"].append({
             "id": node["id"],
             "name": node["name"],
-            "description": description
+            "description": description,
+            "status": "notStarted"  # All new nodes start as not started
         })
 
         logger.info(f"📝 Created node: {node['name']}")
@@ -225,4 +226,67 @@ class GraphOperations:
             "action": "edit",
             "name": node_to_edit["name"],
             "id": edit_info["id"]
+        }
+
+    @staticmethod
+    def update_task_status(
+        status_data: Any,
+        graph_data: Dict[str, Any]
+    ) -> Optional[Dict[str, str]]:
+        """
+        Update the status of an existing task node.
+
+        Args:
+            status_data: Status update data (string or dict) with 'id' and 'status'
+            graph_data: Current graph data (modified in place)
+
+        Returns:
+            Dictionary with update info or None if update failed
+        """
+        # Parse status data
+        update_info = GraphOperations.parse_tool_result(status_data)
+        if update_info is None:
+            return None
+
+        # Validate update has required fields
+        if not isinstance(update_info, dict) or "id" not in update_info or "status" not in update_info:
+            logger.error(f"Invalid status update data: {update_info}")
+            return None
+
+        # Validate status value
+        valid_statuses = ["notStarted", "inProgress", "completed"]
+        new_status = update_info["status"]
+        if new_status not in valid_statuses:
+            logger.error(
+                f"Invalid status value '{new_status}'. "
+                f"Must be one of: {', '.join(valid_statuses)}"
+            )
+            return None
+
+        # Find the node to update
+        node_to_update = None
+        for node in graph_data["nodes"]:
+            if node["id"] == update_info["id"]:
+                node_to_update = node
+                break
+
+        if not node_to_update:
+            logger.error(f"Node not found for status update: {update_info['id']}")
+            return None
+
+        # Update node status
+        old_status = node_to_update.get("status", "notStarted")
+        node_to_update["status"] = new_status
+
+        logger.info(
+            f"🔄 Updated status of '{node_to_update['name']}': "
+            f"{old_status} → {new_status}"
+        )
+
+        return {
+            "action": "update_status",
+            "name": node_to_update["name"],
+            "id": update_info["id"],
+            "old_status": old_status,
+            "new_status": new_status
         }

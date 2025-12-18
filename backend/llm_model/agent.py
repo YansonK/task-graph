@@ -77,7 +77,7 @@ class Agent:
         Returns:
             Dictionary of wrapped tools
         """
-        from .tools import create_task_node, edit_task_node, finish
+        from .tools import create_task_node, edit_task_node, update_task_status, finish
 
         def wrapped_create_task_node(task_name: str, task_description: str, parent_id: str = None):
             """Wrapped create_task_node that streams updates immediately."""
@@ -121,10 +121,32 @@ class Agent:
 
             return result
 
+        def wrapped_update_task_status(node_id: str, status: str):
+            """Wrapped update_task_status that streams updates immediately."""
+            # Call original tool
+            result = update_task_status(node_id, status)
+
+            # Process and update graph immediately
+            graph_update = GraphOperations.update_task_status(result, graph_data)
+
+            # Queue update for streaming
+            if graph_update:
+                import copy
+                stream_queue.put((
+                    'graph_update',
+                    {
+                        'action': graph_update,
+                        'graph_data': copy.deepcopy(graph_data)
+                    }
+                ))
+
+            return result
+
         # Return wrapped tools as DSPy Tool objects
         return {
             "create_task_node": dspy.Tool(wrapped_create_task_node),
             "edit_task_node": dspy.Tool(wrapped_edit_task_node),
+            "update_task_status": dspy.Tool(wrapped_update_task_status),
             "finish": dspy.Tool(finish)
         }
 

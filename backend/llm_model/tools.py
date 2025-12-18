@@ -41,6 +41,21 @@ def edit_task_node(node_id: str, name: Optional[str] = None, description: Option
 
     return result
 
+def update_task_status(node_id: str, status: str) -> dict:
+    """Update the status of an existing task node.
+
+    Args:
+        node_id: The ID of the node to update (required)
+        status: New status for the node. Must be one of: 'notStarted', 'inProgress', 'completed'
+
+    Returns:
+        Dictionary with the node_id and new status
+    """
+    return {
+        "id": node_id,
+        "status": status
+    }
+
 def finish():
     """Conclude the trajectory."""
     return "Finish"
@@ -49,11 +64,19 @@ def finish():
 tools = {
     "create_task_node": dspy.Tool(create_task_node),
     "edit_task_node": dspy.Tool(edit_task_node),
+    "update_task_status": dspy.Tool(update_task_status),
     "finish": dspy.Tool(finish)  # To allow the agent to finish
 }
 
 class TaskBreakdownSignature(dspy.Signature):
-    """Agent for breaking down tasks and managing a task graph. Will guide users to more specific tasks before commiting to creating new task nodes."""
+    """Agent for breaking down tasks and managing a task graph. Will guide users to more specific tasks before commiting to creating new task nodes.
+
+    You can track the progress of tasks by updating their status:
+    - 'notStarted': Task has been created but not yet started (default for new tasks)
+    - 'inProgress': Task is currently being worked on
+    - 'completed': Task has been finished
+
+    Use the update_task_status tool to transition tasks through these states as work progresses. When you begin working on a task, mark it as 'inProgress'. When you finish a task, mark it as 'completed'."""
     conversation_history: str = dspy.InputField()
-    task_nodes: dict = dspy.InputField(desc="Current list of task nodes and their links")
+    task_nodes: dict = dspy.InputField(desc="Current list of task nodes and their links. Each node has an optional 'status' field that can be 'notStarted', 'inProgress', or 'completed'")
     response: str = dspy.OutputField(desc="Agent's reply to the user")
