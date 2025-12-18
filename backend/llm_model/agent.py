@@ -50,6 +50,7 @@ class Agent:
 
         # Create streaming version of the agent with StreamListener
         # Stream both thinking and response for full transparency
+        # allow_reuse=True enables streaming on every request (requires DSPy 3.0+)
         self.streaming_agent = dspy.streamify(
             self.react_agent,
             stream_listeners=[
