@@ -25,8 +25,8 @@ deprecation==2.1.0
 dill==0.3.8
 diskcache==5.6.3
 distro==1.9.0
-dspy==2.6.10
-dspy-ai==2.6.10
+dspy==3.0.4
+dspy-ai==3.0.4
 filelock==3.17.0
 firebase-admin==6.6.0
 firebase-functions==0.4.2
