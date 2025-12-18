@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Configuration
-MAX_ITERS = 5
+MAX_ITERS = 15
 
 
 class Agent:
