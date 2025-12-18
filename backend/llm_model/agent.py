@@ -1,35 +1,57 @@
+"""
+AI Agent for task graph management.
+
+This module provides an agent that:
+- Uses DSPy's ReAct pattern for reasoning
+- Streams responses in real-time
+- Manages task graph operations incrementally
+"""
+
 import os
-from .tools import tools, TaskBreakdownSignature
 import dspy
-import json
+import asyncio
 import logging
+import queue
+import threading
 from typing import AsyncGenerator, Dict, Any
 from openai import AsyncOpenAI
-import asyncio
+
+from .tools import tools, TaskBreakdownSignature
+from .streaming_lm import StreamingLM
+from .graph_operations import GraphOperations
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-max_iters = 5
+# Configuration
+MAX_ITERS = 5
+
 
 class Agent:
+    """
+    AI Agent for managing task graphs with streaming capabilities.
+    """
+
     def __init__(self):
-        # Get OpenAI API key from environment
+        """Initialize the agent with OpenAI configuration."""
+        # Get and validate API key
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
 
-        # Check if key is a placeholder
         if 'your_openai_api_key_here' in api_key.lower() or 'sk-' not in api_key:
-            raise ValueError(f"OPENAI_API_KEY appears to be invalid. Please set a real OpenAI API key in backend/.env")
+            raise ValueError(
+                "OPENAI_API_KEY appears to be invalid. "
+                "Please set a real OpenAI API key in backend/.env"
+            )
 
         logger.info(f"Initializing Agent with OpenAI API key: {api_key[:10]}...")
 
-        # Store API key for direct OpenAI client usage
+        # Store API key
         self.api_key = api_key
 
-        # Initialize AsyncOpenAI client for streaming
+        # Initialize AsyncOpenAI client
         self.openai_client = AsyncOpenAI(api_key=api_key)
 
         # Configure DSPy with OpenAI GPT-4o-mini
@@ -37,204 +59,200 @@ class Agent:
         self.react_agent = dspy.ReAct(
             TaskBreakdownSignature,
             tools=list(tools.values()),
-            max_iters=max_iters
+            max_iters=MAX_ITERS
         )
 
-    async def query_stream(self, chat_history, graph_data) -> AsyncGenerator[Dict[str, Any], None]:
+    def _create_streaming_tools(
+        self,
+        graph_data: Dict[str, Any],
+        stream_queue: queue.Queue
+    ) -> dict:
         """
-        Streaming query method using DSPy's ReAct agent with TRUE real-time streaming.
+        Create wrapped versions of tools that stream updates in real-time.
 
-        This provides intelligent multi-step reasoning with tokens streamed as generated.
+        Args:
+            graph_data: Current graph data (modified in place)
+            stream_queue: Queue for streaming updates
+
+        Returns:
+            Dictionary of wrapped tools
+        """
+        from .tools import create_task_node, edit_task_node, finish
+
+        def wrapped_create_task_node(task_name: str, task_description: str, parent_id: str = None):
+            """Wrapped create_task_node that streams updates immediately."""
+            # Call original tool
+            result = create_task_node(task_name, task_description, parent_id)
+
+            # Process and update graph immediately
+            graph_update = GraphOperations.create_task_node(result, graph_data)
+
+            # Queue update for streaming
+            if graph_update:
+                import copy
+                stream_queue.put((
+                    'graph_update',
+                    {
+                        'action': graph_update,
+                        'graph_data': copy.deepcopy(graph_data)
+                    }
+                ))
+
+            return result
+
+        def wrapped_edit_task_node(node_id: str, name: str = None, description: str = None, parent_id: str = None):
+            """Wrapped edit_task_node that streams updates immediately."""
+            # Call original tool
+            result = edit_task_node(node_id, name, description, parent_id)
+
+            # Process and update graph immediately
+            graph_update = GraphOperations.edit_task_node(result, graph_data)
+
+            # Queue update for streaming
+            if graph_update:
+                import copy
+                stream_queue.put((
+                    'graph_update',
+                    {
+                        'action': graph_update,
+                        'graph_data': copy.deepcopy(graph_data)
+                    }
+                ))
+
+            return result
+
+        # Return wrapped tools as DSPy Tool objects
+        return {
+            "create_task_node": dspy.Tool(wrapped_create_task_node),
+            "edit_task_node": dspy.Tool(wrapped_edit_task_node),
+            "finish": dspy.Tool(finish)
+        }
+
+    def run_react_agent(
+        self,
+        chat_history: list,
+        graph_data: Dict[str, Any],
+        stream_queue: queue.Queue,
+        agent_result: dict,
+        agent_error: dict,
+        agent_done: threading.Event
+    ):
+        """
+        Run the ReAct agent in a background thread with streaming.
+
+        This method:
+        1. Creates a streaming LM instance
+        2. Creates wrapped tools that stream updates immediately
+        3. Runs the ReAct agent with streaming tools
+        4. All updates stream in real-time as tools execute
+
+        Args:
+            chat_history: Chat message history
+            graph_data: Current graph data (modified in place)
+            stream_queue: Queue for streaming updates
+            agent_result: Dict to store final result
+            agent_error: Dict to store any errors
+            agent_done: Event to signal completion
+        """
+        try:
+            # Create streaming LM instance
+            streaming_lm = StreamingLM(
+                model='openai/gpt-4o-mini',
+                api_key=self.api_key,
+                stream_queue=stream_queue
+            )
+
+            # Create wrapped tools that stream updates immediately
+            streaming_tools = self._create_streaming_tools(graph_data, stream_queue)
+
+            # Create a custom ReAct agent with streaming tools
+            from .tools import TaskBreakdownSignature
+            streaming_react = dspy.ReAct(
+                TaskBreakdownSignature,
+                tools=list(streaming_tools.values()),
+                max_iters=MAX_ITERS
+            )
+
+            # Run ReAct with streaming LM and tools
+            with dspy.context(lm=streaming_lm):
+                result = streaming_react(
+                    conversation_history=chat_history,
+                    task_nodes=graph_data
+                )
+
+                agent_result['result'] = result
+
+        except Exception as e:
+            agent_error['error'] = e
+            logger.error(f"ReAct agent error: {e}")
+        finally:
+            agent_done.set()
+
+    async def query_stream(
+        self,
+        chat_history: list,
+        graph_data: Dict[str, Any]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Stream query responses with real-time updates.
+
+        This provides TRUE streaming where:
+        - Thinking tokens stream as they're generated
+        - Tool results stream as they execute
+        - Graph updates stream incrementally
+
+        Args:
+            chat_history: List of chat messages
+            graph_data: Current graph data
 
         Yields:
             Dict with 'type' and corresponding data:
-            - {'type': 'token', 'content': str} - Text chunk as generated by the model
-            - {'type': 'graph_update', 'graph_data': dict} - Updated graph
+            - {'type': 'token', 'content': str} - Response text chunk
+            - {'type': 'thinking', 'content': str} - Reasoning text chunk
+            - {'type': 'graph_update', 'graph_data': dict, 'action': dict} - Graph update
         """
         try:
             # Queue to communicate between sync ReAct and async streaming
-            import queue
-            import threading
-
             stream_queue = queue.Queue()
             agent_done = threading.Event()
             agent_result = {}
             agent_error = {}
 
-            # Custom streaming callback
-            class StreamingLM(dspy.LM):
-                def __init__(self, model, api_key, stream_queue):
-                    super().__init__(model=model, api_key=api_key)
-                    self.api_key = api_key  # Store api_key as instance attribute
-                    self.stream_queue = stream_queue
-                    self.base_client = AsyncOpenAI(api_key=api_key)
-                    self.call_count = 0  # Track which LM call we're on
-
-                def parse_thinking_content(self, text):
-                    """Parse thinking text and strip headers, return formatted content"""
-                    import re
-
-                    # Remove header markers and format content
-                    sections = []
-
-                    # Extract next_thought
-                    thought_match = re.search(r'\[\[ ## next_thought ## \]\](.*?)(?=\[\[|$)', text, re.DOTALL)
-                    if thought_match:
-                        thought = thought_match.group(1).strip()
-                        if thought:
-                            sections.append(f"💭 {thought}")
-
-                    # Extract next_tool_name
-                    tool_match = re.search(r'\[\[ ## next_tool_name ## \]\](.*?)(?=\[\[|$)', text, re.DOTALL)
-                    if tool_match:
-                        tool = tool_match.group(1).strip().strip("'\"")
-                        if tool and tool != 'finish':
-                            sections.append(f"🔧 Tool: {tool}")
-
-                    # Extract next_tool_args
-                    args_match = re.search(r'\[\[ ## next_tool_args ## \]\](.*?)(?=\[\[|$)', text, re.DOTALL)
-                    if args_match:
-                        args = args_match.group(1).strip()
-                        if args and args != '{}':
-                            try:
-                                args_obj = json.loads(args)
-                                sections.append(f"📋 Args: {json.dumps(args_obj, indent=2)}")
-                            except:
-                                sections.append(f"📋 Args: {args}")
-
-                    return '\n\n'.join(sections) if sections else None
-
-                def __call__(self, prompt=None, messages=None, **kwargs):
-                    """Override to capture and stream responses"""
-                    import openai
-                    import re
-
-                    self.call_count += 1
-
-                    # Prepare the request
-                    if messages is None and prompt:
-                        messages = [{"role": "user", "content": prompt}]
-
-                    # Detect if this is a thinking call or final response
-                    prompt_text = str(prompt or messages)
-                    is_thinking = 'next_thought' in prompt_text or 'Thought' in prompt_text or self.call_count == 1
-
-                    # Make streaming request to OpenAI
-                    client = openai.OpenAI(api_key=self.api_key)
-                    stream = client.chat.completions.create(
-                        model=self.model.replace('openai/', ''),
-                        messages=messages,
-                        stream=True,
-                        **kwargs
-                    )
-
-                    # Collect full response while streaming from OpenAI
-                    full_response = ""
-                    for chunk in stream:
-                        if chunk.choices and len(chunk.choices) > 0:
-                            delta = chunk.choices[0].delta
-                            if delta.content:
-                                full_response += delta.content
-
-                    logger.info(f"=== LM Call {self.call_count} ===")
-                    logger.info(f"Is Thinking: {is_thinking}")
-                    logger.info(f"Response Length: {len(full_response)} chars")
-                    logger.info(f"Response: {full_response[:300]}...")
-                    logger.info("=" * 50)
-
-                    # Helper to stream text smoothly
-                    def stream_smoothly(text, msg_type, chunk_size=3):
-                        """Stream text in small chunks for smooth output"""
-                        if not text:
-                            return
-                        for i in range(0, len(text), chunk_size):
-                            self.stream_queue.put((msg_type, text[i:i + chunk_size]))
-
-                    # Process and stream based on type
-                    if is_thinking:
-                        # Parse thinking content
-                        formatted = self.parse_thinking_content(full_response)
-                        if formatted:
-                            stream_smoothly(formatted, 'thinking')
-                    else:
-                        # Extract clean response text
-                        extracted = None
-
-                        # Strategy 1: Extract from [[ ## response ## ]] markers
-                        if '[[ ## response ## ]]' in full_response:
-                            match = re.search(r'\[\[ ## response ## \]\](.*?)(?:\[\[ ## completed ## \]\]|$)', full_response, re.DOTALL)
-                            if match:
-                                extracted = match.group(1).strip()
-                                logger.info(f"Extracted via markers: {extracted[:100]}...")
-
-                        # Strategy 2: Extract from JSON format
-                        if not extracted:
-                            json_match = re.search(r'"response"\s*:\s*"([^"]+)"', full_response)
-                            if json_match:
-                                extracted = json_match.group(1)
-                                logger.info(f"Extracted via JSON: {extracted[:100]}...")
-
-                        # Strategy 3: Use full response as fallback
-                        if not extracted:
-                            extracted = full_response
-                            logger.info(f"Using full response: {extracted[:100]}...")
-
-                        # Stream the clean response
-                        stream_smoothly(extracted, 'token')
-
-                    # Return original response for DSPy
-                    return [full_response]
-
-            # Run ReAct agent in background thread with streaming LM
-            def run_react_with_streaming():
-                try:
-                    # Create streaming LM instance
-                    streaming_lm = StreamingLM(
-                        model='openai/gpt-4o-mini',
-                        api_key=self.api_key,
-                        stream_queue=stream_queue
-                    )
-
-                    # Run ReAct with streaming LM
-                    with dspy.context(lm=streaming_lm):
-                        result = self.react_agent(
-                            conversation_history=chat_history,
-                            task_nodes=graph_data
-                        )
-
-                    agent_result['result'] = result
-                except Exception as e:
-                    agent_error['error'] = e
-                    logger.error(f"ReAct agent error: {e}")
-                finally:
-                    agent_done.set()
-
             # Start the agent in background thread
-            agent_thread = threading.Thread(target=run_react_with_streaming)
+            agent_thread = threading.Thread(
+                target=self.run_react_agent,
+                args=(
+                    chat_history,
+                    graph_data,
+                    stream_queue,
+                    agent_result,
+                    agent_error,
+                    agent_done
+                )
+            )
             agent_thread.start()
 
-            # Stream tokens from queue as they arrive
+            # Stream updates from queue as they arrive
             while not agent_done.is_set() or not stream_queue.empty():
                 try:
-                    # Try to get tokens from queue with shorter timeout for responsiveness
+                    # Try to get updates from queue
                     msg_type, content = stream_queue.get(timeout=0.02)
+
                     if msg_type == 'token':
-                        yield {
-                            'type': 'token',
-                            'content': content
-                        }
+                        yield {'type': 'token', 'content': content}
+
                     elif msg_type == 'thinking':
+                        yield {'type': 'thinking', 'content': content}
+
+                    elif msg_type == 'graph_update':
+                        logger.info(f"📤 Sending graph update: {content['action']}")
                         yield {
-                            'type': 'thinking',
-                            'content': content
+                            'type': 'graph_update',
+                            'graph_data': content['graph_data']
                         }
-                    elif msg_type == 'replace_response':
-                        yield {
-                            'type': 'replace_response',
-                            'content': content
-                        }
+
                 except queue.Empty:
-                    # No tokens available, minimal wait before checking again
+                    # No updates available, minimal wait before checking again
                     await asyncio.sleep(0.001)
 
             # Wait for thread to complete
@@ -244,147 +262,14 @@ class Agent:
             if 'error' in agent_error:
                 raise agent_error['error']
 
-            # Process tool calls and update graph
-            if 'result' in agent_result:
-                result = agent_result['result']
-
-                for i in range(max_iters):
-                    current_tool = f"tool_name_{i}"
-                    tool_result = f'observation_{i}'
-
-                    if current_tool not in result.trajectory:
-                        break
-
-                    if result.trajectory[current_tool] == "create_task_node":
-                        # Create a new task node
-                        node_data = result.trajectory[tool_result]
-
-                        # Check if this is an error message
-                        if isinstance(node_data, str) and ("error" in node_data.lower() or "execution error" in node_data.lower()):
-                            logger.error(f"Tool execution failed: {node_data}")
-                            break
-
-                        # Parse if it's a string (JSON or dict representation)
-                        if isinstance(node_data, str):
-                            try:
-                                node = json.loads(node_data)
-                            except json.JSONDecodeError:
-                                # Try eval as fallback (for dict string representation)
-                                try:
-                                    import ast
-                                    node = ast.literal_eval(node_data)
-                                except (SyntaxError, ValueError) as e:
-                                    logger.error(f"Failed to parse node data: {node_data}. Error: {e}")
-                                    break
-                        else:
-                            node = node_data
-
-                        # Validate node has required fields
-                        if not isinstance(node, dict) or "id" not in node or "name" not in node or "description" not in node:
-                            logger.error(f"Invalid node data: {node}")
-                            break
-
-                        # Validate parent exists if parent_id is specified
-                        parent_id = node.get("parent_id")
-                        if parent_id:
-                            parent_exists = any(n["id"] == parent_id for n in graph_data["nodes"])
-                            if not parent_exists:
-                                logger.warning(f"Parent node {parent_id} not found for node {node['id']}, skipping link creation")
-                                parent_id = None
-
-                        # Create link if parent exists
-                        if parent_id:
-                            graph_data["links"].append({
-                                "source": parent_id,
-                                "target": node["id"]
-                            })
-
-                        # Ensure description is not None
-                        description = node.get("description", "")
-
-                        graph_data["nodes"].append({
-                            "id": node["id"],
-                            "name": node["name"],
-                            "description": description
-                        })
-
-                        logger.info(f"Created task node: {node['name']}")
-
-                    elif result.trajectory[current_tool] == "edit_task_node":
-                        # Edit an existing task node
-                        edit_data = result.trajectory[tool_result]
-
-                        # Check if this is an error message
-                        if isinstance(edit_data, str) and ("error" in edit_data.lower() or "execution error" in edit_data.lower()):
-                            logger.error(f"Tool execution failed: {edit_data}")
-                            break
-
-                        # Parse if it's a string (JSON or dict representation)
-                        if isinstance(edit_data, str):
-                            try:
-                                edit_info = json.loads(edit_data)
-                            except json.JSONDecodeError:
-                                # Try eval as fallback (for dict string representation)
-                                try:
-                                    import ast
-                                    edit_info = ast.literal_eval(edit_data)
-                                except (SyntaxError, ValueError) as e:
-                                    logger.error(f"Failed to parse edit data: {edit_data}. Error: {e}")
-                                    break
-                        else:
-                            edit_info = edit_data
-
-                        # Validate edit has required fields
-                        if not isinstance(edit_info, dict) or "id" not in edit_info:
-                            logger.error(f"Invalid edit data: {edit_info}")
-                            break
-
-                        # Find the node to edit
-                        node_to_edit = None
-                        for node in graph_data["nodes"]:
-                            if node["id"] == edit_info["id"]:
-                                node_to_edit = node
-                                break
-
-                        if not node_to_edit:
-                            logger.error(f"Node not found for editing: {edit_info['id']}")
-                            break
-
-                        # Update node fields if provided (with validation)
-                        if "name" in edit_info and edit_info["name"]:
-                            node_to_edit["name"] = edit_info["name"]
-                        if "description" in edit_info:
-                            # Allow empty description but not None
-                            node_to_edit["description"] = edit_info["description"] if edit_info["description"] is not None else node_to_edit.get("description", "")
-
-                        # Handle parent_id change if provided
-                        if "parent_id" in edit_info:
-                            # Remove any existing links where this node is the target
-                            graph_data["links"] = [
-                                link for link in graph_data["links"]
-                                if link["target"] != edit_info["id"]
-                            ]
-
-                            # Add new parent link if parent_id is not None
-                            new_parent_id = edit_info["parent_id"]
-                            if new_parent_id:
-                                # Validate parent exists
-                                parent_exists = any(n["id"] == new_parent_id for n in graph_data["nodes"])
-                                if parent_exists:
-                                    graph_data["links"].append({
-                                        "source": new_parent_id,
-                                        "target": edit_info["id"]
-                                    })
-                                else:
-                                    logger.warning(f"Parent node {new_parent_id} not found, skipping link creation")
-
-                        logger.info(f"Edited task node: {node_to_edit['name']}")
-
-            # Send final graph update
+            # Send final graph update to ensure client has latest state
+            logger.info("📤 Sending final graph update")
             yield {
                 'type': 'graph_update',
                 'graph_data': graph_data
             }
+
+            logger.info("✅ Stream completed successfully")
 
         except Exception as e:
             logger.error(f"Streaming error: {e}")
