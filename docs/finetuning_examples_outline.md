@@ -29,6 +29,189 @@ example = dspy.Example(
 
 ---
 
+## ReAct Agent Trajectory Format (Critical for Tool-Using Agents)
+
+When training a ReAct agent with tool access, the training examples must include the **trajectory** - the complete reasoning and tool-calling trace. This is how the agent learns to interleave thinking and tool usage.
+
+### Trajectory Structure
+
+The trajectory is a dictionary that accumulates step-by-step agent reasoning:
+
+```python
+trajectory = {
+    # Step 0
+    "thought_0": "I need to break down this project into subtasks...",
+    "tool_name_0": "create_task_node",
+    "tool_args_0": {"task_name": "Web App", "task_description": "Full-stack web application"},
+    "observation_0": {"id": "node_1", "name": "Web App", "description": "Full-stack web application"},
+
+    # Step 1
+    "thought_1": "Now I should add the frontend subtask...",
+    "tool_name_1": "create_task_node",
+    "tool_args_1": {"task_name": "Frontend", "task_description": "React UI", "parent_id": "node_1"},
+    "observation_1": {"id": "node_2", "name": "Frontend", "description": "React UI", "parent_id": "node_1"},
+
+    # Step 2 (finishing)
+    "thought_2": "I've created the task breakdown. Time to finish.",
+    "tool_name_2": "finish",
+    "tool_args_2": {},
+    "observation_2": "Completed."
+}
+```
+
+### ReAct Output Fields
+
+Each step in the ReAct loop produces three outputs:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `next_thought` | `str` | Agent's reasoning about the current situation |
+| `next_tool_name` | `Literal[tool_names]` | Selected tool from available options |
+| `next_tool_args` | `dict[str, Any]` | Arguments for the tool call |
+
+### Complete Training Example with Trajectory
+
+```python
+import dspy
+from typing import Literal
+
+# Full training example for a ReAct agent
+training_example = dspy.Example(
+    # Input fields
+    conversation_history="User: I want to build a blog platform with authentication",
+    task_nodes={"nodes": [], "links": []},
+
+    # The trajectory captures the full reasoning + tool use sequence
+    trajectory={
+        # Step 0: Create main task
+        "thought_0": "The user wants to build a blog platform with authentication. I'll create the main project task first.",
+        "tool_name_0": "create_task_node",
+        "tool_args_0": {
+            "task_name": "Blog Platform",
+            "task_description": "Full-stack blog with user authentication"
+        },
+        "observation_0": {
+            "id": "node_1",
+            "name": "Blog Platform",
+            "description": "Full-stack blog with user authentication"
+        },
+
+        # Step 1: Create authentication subtask
+        "thought_1": "Now I need to add the authentication feature as a subtask.",
+        "tool_name_1": "create_task_node",
+        "tool_args_1": {
+            "task_name": "User Authentication",
+            "task_description": "Login, registration, password reset, sessions",
+            "parent_id": "node_1"
+        },
+        "observation_1": {
+            "id": "node_2",
+            "name": "User Authentication",
+            "description": "Login, registration, password reset, sessions",
+            "parent_id": "node_1"
+        },
+
+        # Step 2: Create blog posts subtask
+        "thought_2": "I should also add the core blog functionality.",
+        "tool_name_2": "create_task_node",
+        "tool_args_2": {
+            "task_name": "Blog Posts",
+            "task_description": "Create, edit, delete, and display blog posts",
+            "parent_id": "node_1"
+        },
+        "observation_2": {
+            "id": "node_3",
+            "name": "Blog Posts",
+            "description": "Create, edit, delete, and display blog posts",
+            "parent_id": "node_1"
+        },
+
+        # Step 3: Finish
+        "thought_3": "I've created a good initial breakdown. The user can expand these further.",
+        "tool_name_3": "finish",
+        "tool_args_3": {},
+        "observation_3": "Completed."
+    },
+
+    # Final response to user
+    response="I've created a task breakdown for your blog platform with two main subtasks: User Authentication and Blog Posts. Would you like me to break these down further?"
+
+).with_inputs("conversation_history", "task_nodes")
+```
+
+### How BootstrapFinetune Uses Trajectories
+
+When using `dspy.BootstrapFinetune`:
+
+1. **Teacher Program Execution**: The teacher (optimized) program runs on training inputs
+2. **Trace Collection**: DSPy records the full trajectory including:
+   - Each `next_thought` reasoning step
+   - Each `next_tool_name` selection
+   - Each `next_tool_args` dictionary
+   - Each `observation` from tool execution
+3. **Training Data Generation**: These traces become prompt-completion pairs
+4. **Fine-tuning**: The student model learns to reproduce these reasoning patterns
+
+```python
+# Example optimization with trajectory learning
+dspy.settings.experimental = True
+
+optimizer = dspy.BootstrapFinetune(
+    metric=task_completion_metric,  # Your evaluation metric
+    num_threads=8
+)
+
+# Teacher is a prompt-optimized ReAct agent
+finetuned_agent = optimizer.compile(
+    student=student_react_agent,
+    teacher=teacher_react_agent,
+    trainset=training_examples
+)
+```
+
+### Trajectory Examples by Scenario
+
+#### Single Tool Call Trajectory
+```python
+trajectory = {
+    "thought_0": "User wants to mark the authentication task as complete.",
+    "tool_name_0": "update_task_status",
+    "tool_args_0": {"node_id": "node_2", "status": "completed"},
+    "observation_0": {"id": "node_2", "status": "completed"},
+    "thought_1": "Done. I'll inform the user.",
+    "tool_name_1": "finish",
+    "tool_args_1": {},
+    "observation_1": "Completed."
+}
+```
+
+#### No Tool Call Trajectory (Clarification)
+```python
+trajectory = {
+    "thought_0": "The user's request is too vague. I need more details before creating tasks.",
+    "tool_name_0": "finish",
+    "tool_args_0": {},
+    "observation_0": "Completed."
+}
+# response = "Could you tell me more about what you're building? What's the main goal?"
+```
+
+#### Multi-Tool Sequence Trajectory
+```python
+trajectory = {
+    "thought_0": "User wants to reorganize - move testing under QA and rename it.",
+    "tool_name_0": "edit_task_node",
+    "tool_args_0": {"node_id": "node_5", "parent_id": "node_qa", "name": "Quality Assurance Testing"},
+    "observation_0": {"id": "node_5", "name": "Quality Assurance Testing", "parent_id": "node_qa"},
+    "thought_1": "Successfully moved and renamed. Task complete.",
+    "tool_name_1": "finish",
+    "tool_args_1": {},
+    "observation_1": "Completed."
+}
+```
+
+---
+
 ## Category 1: Single Tool Usage Examples
 
 ### 1.1 Create Task Node Examples
