@@ -1,10 +1,24 @@
+"""
+AI Agent for task graph management.
+
+This module provides an agent that:
+- Uses DSPy's ReAct pattern for reasoning
+- Streams responses in real-time
+- Manages task graph operations incrementally
+"""
+
 import os
-from .tools import tools, TaskBreakdownSignature
 import dspy
-import json
-import logging
-from typing import AsyncGenerator, Dict, Any
 import asyncio
+import logging
+import queue
+import threading
+from typing import AsyncGenerator, Dict, Any
+from openai import AsyncOpenAI
+
+from .tools import tools, TaskBreakdownSignature
+from .streaming_lm import StreamingLM
+from .graph_operations import GraphOperations
 
 # Set up logging
 logging.basicConfig(
@@ -14,29 +28,35 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Silence noisy third-party loggers
-logging.getLogger('LiteLLM').setLevel(logging.WARNING)
-logging.getLogger('httpx').setLevel(logging.WARNING)
-logging.getLogger('openai').setLevel(logging.WARNING)
-logging.getLogger('httpcore').setLevel(logging.WARNING)
+# Configuration
+MAX_ITERS = 5
 
-max_iters = 5
 
 class Agent:
+    """
+    AI Agent for managing task graphs with streaming capabilities.
+    """
+
     def __init__(self):
-        # Get OpenAI API key from environment
+        """Initialize the agent with OpenAI configuration."""
+        # Get and validate API key
         api_key = os.getenv('OPENAI_API_KEY')
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is not set")
 
-        # Check if key is a placeholder
         if 'your_openai_api_key_here' in api_key.lower() or 'sk-' not in api_key:
-            raise ValueError(f"OPENAI_API_KEY appears to be invalid. Please set a real OpenAI API key in backend/.env")
+            raise ValueError(
+                "OPENAI_API_KEY appears to be invalid. "
+                "Please set a real OpenAI API key in backend/.env"
+            )
 
         logger.info(f"Initializing Agent with OpenAI API key: {api_key[:10]}...")
 
-        # Store API key for direct OpenAI client usage
+        # Store API key
         self.api_key = api_key
+
+        # Initialize AsyncOpenAI client
+        self.openai_client = AsyncOpenAI(api_key=api_key)
 
         # Configure DSPy with OpenAI GPT-4o-mini
         dspy.configure(lm=dspy.LM('openai/gpt-4o-mini', api_key=api_key))
@@ -45,62 +65,201 @@ class Agent:
         self.react_agent = dspy.ReAct(
             TaskBreakdownSignature,
             tools=list(tools.values()),
-            max_iters=max_iters
+            max_iters=MAX_ITERS
         )
 
-        # Create streaming version of the agent with StreamListener
-        # Stream both thinking and response for full transparency
-        # allow_reuse=True enables streaming on every request (requires DSPy 3.0+)
-        self.streaming_agent = dspy.streamify(
-            self.react_agent,
-            stream_listeners=[
-                dspy.streaming.StreamListener(
-                    signature_field_name="next_thought",
-                    allow_reuse=True
-                ),
-                dspy.streaming.StreamListener(
-                    signature_field_name="response",
-                    allow_reuse=True
-                )
-            ]
-        )
-
-    async def query_stream(self, chat_history, graph_data) -> AsyncGenerator[Dict[str, Any], None]:
+    def _create_streaming_tools(
+        self,
+        graph_data: Dict[str, Any],
+        stream_queue: queue.Queue
+    ) -> dict:
         """
-        Streaming query method using DSPy's native streamify and StreamListener.
+        Create wrapped versions of tools that stream updates in real-time.
 
-        This uses DSPy's built-in streaming capabilities for clean, maintainable code.
+        Args:
+            graph_data: Current graph data (modified in place)
+            stream_queue: Queue for streaming updates
+
+        Returns:
+            Dictionary of wrapped tools
+        """
+        from .tools import create_task_node, edit_task_node, finish
+
+        def wrapped_create_task_node(task_name: str, task_description: str, parent_id: str = None):
+            """Wrapped create_task_node that streams updates immediately."""
+            # Call original tool
+            result = create_task_node(task_name, task_description, parent_id)
+
+            # Process and update graph immediately
+            graph_update = GraphOperations.create_task_node(result, graph_data)
+
+            # Queue update for streaming
+            if graph_update:
+                import copy
+                stream_queue.put((
+                    'graph_update',
+                    {
+                        'action': graph_update,
+                        'graph_data': copy.deepcopy(graph_data)
+                    }
+                ))
+
+            return result
+
+        def wrapped_edit_task_node(node_id: str, name: str = None, description: str = None, parent_id: str = None):
+            """Wrapped edit_task_node that streams updates immediately."""
+            # Call original tool
+            result = edit_task_node(node_id, name, description, parent_id)
+
+            # Process and update graph immediately
+            graph_update = GraphOperations.edit_task_node(result, graph_data)
+
+            # Queue update for streaming
+            if graph_update:
+                import copy
+                stream_queue.put((
+                    'graph_update',
+                    {
+                        'action': graph_update,
+                        'graph_data': copy.deepcopy(graph_data)
+                    }
+                ))
+
+            return result
+
+        # Return wrapped tools as DSPy Tool objects
+        return {
+            "create_task_node": dspy.Tool(wrapped_create_task_node),
+            "edit_task_node": dspy.Tool(wrapped_edit_task_node),
+            "finish": dspy.Tool(finish)
+        }
+
+    def run_react_agent(
+        self,
+        chat_history: list,
+        graph_data: Dict[str, Any],
+        stream_queue: queue.Queue,
+        agent_result: dict,
+        agent_error: dict,
+        agent_done: threading.Event
+    ):
+        """
+        Run the ReAct agent in a background thread with streaming.
+
+        This method:
+        1. Creates a streaming LM instance
+        2. Creates wrapped tools that stream updates immediately
+        3. Runs the ReAct agent with streaming tools
+        4. All updates stream in real-time as tools execute
+
+        Args:
+            chat_history: Chat message history
+            graph_data: Current graph data (modified in place)
+            stream_queue: Queue for streaming updates
+            agent_result: Dict to store final result
+            agent_error: Dict to store any errors
+            agent_done: Event to signal completion
+        """
+        try:
+            # Create streaming LM instance
+            streaming_lm = StreamingLM(
+                model='openai/gpt-4o-mini',
+                api_key=self.api_key,
+                stream_queue=stream_queue
+            )
+
+            # Create wrapped tools that stream updates immediately
+            streaming_tools = self._create_streaming_tools(graph_data, stream_queue)
+
+            # Create a custom ReAct agent with streaming tools
+            from .tools import TaskBreakdownSignature
+            streaming_react = dspy.ReAct(
+                TaskBreakdownSignature,
+                tools=list(streaming_tools.values()),
+                max_iters=MAX_ITERS
+            )
+
+            # Run ReAct with streaming LM and tools
+            with dspy.context(lm=streaming_lm):
+                result = streaming_react(
+                    conversation_history=chat_history,
+                    task_nodes=graph_data
+                )
+
+                agent_result['result'] = result
+
+        except Exception as e:
+            agent_error['error'] = e
+            logger.error(f"ReAct agent error: {e}")
+        finally:
+            agent_done.set()
+
+    async def query_stream(
+        self,
+        chat_history: list,
+        graph_data: Dict[str, Any]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Stream query responses with real-time updates.
+
+        This provides TRUE streaming where:
+        - Thinking tokens stream as they're generated
+        - Tool results stream as they execute
+        - Graph updates stream incrementally
+
+        Args:
+            chat_history: List of chat messages
+            graph_data: Current graph data
 
         Yields:
             Dict with 'type' and corresponding data:
-            - {'type': 'token', 'content': str} - Text chunk as generated by the model
-            - {'type': 'graph_update', 'graph_data': dict} - Updated graph
+            - {'type': 'token', 'content': str} - Response text chunk
+            - {'type': 'thinking', 'content': str} - Reasoning text chunk
+            - {'type': 'graph_update', 'graph_data': dict, 'action': dict} - Graph update
         """
         try:
-            final_result = None
-            current_thought = ""
-            response_was_streamed = False
+            # Queue to communicate between sync ReAct and async streaming
+            stream_queue = queue.Queue()
+            agent_done = threading.Event()
+            agent_result = {}
+            agent_error = {}
 
-            # Use DSPy's native streaming - async iteration over streamify output
-            async for chunk in self.streaming_agent(
-                conversation_history=chat_history,
-                task_nodes=graph_data
-            ):
-                # DSPy yields either StreamResponse (tokens) or Prediction (final result)
-                if isinstance(chunk, dspy.streaming.StreamResponse):
-                    # Track what field is being streamed
-                    field = chunk.signature_field_name
+            # Start the agent in background thread
+            agent_thread = threading.Thread(
+                target=self.run_react_agent,
+                args=(
+                    chat_history,
+                    graph_data,
+                    stream_queue,
+                    agent_result,
+                    agent_error,
+                    agent_done
+                )
+            )
+            agent_thread.start()
 
-                    # Accumulate for logging
-                    if field == "next_thought":
-                        current_thought += chunk.chunk
-                    elif field == "response":
-                        response_was_streamed = True
-                        # Stream response tokens to the user
+            # Stream updates from queue as they arrive
+            while not agent_done.is_set() or not stream_queue.empty():
+                try:
+                    # Try to get updates from queue
+                    msg_type, content = stream_queue.get(timeout=0.02)
+
+                    if msg_type == 'token':
+                        yield {'type': 'token', 'content': content}
+
+                    elif msg_type == 'thinking':
+                        yield {'type': 'thinking', 'content': content}
+
+                    elif msg_type == 'graph_update':
+                        logger.info(f"📤 Sending graph update: {content['action']}")
                         yield {
-                            'type': 'token',
-                            'content': chunk.chunk
+                            'type': 'graph_update',
+                            'graph_data': content['graph_data']
                         }
+
+                except queue.Empty:
+                    # No updates available, minimal wait before checking again
+                    await asyncio.sleep(0.001)
 
                 elif isinstance(chunk, dspy.Prediction):
                     # Log the completed thought if we accumulated any
@@ -112,29 +271,14 @@ class Agent:
                     final_result = chunk
                     logger.info(f"✓ Completed reasoning")
 
-            # Process tool calls and update graph from the final result
-            if final_result:
-                await self._process_graph_updates(final_result, graph_data)
-
-                # Check if response was streamed, if not send it now from the prediction
-                # Fallback for cases where DSPy doesn't stream the response field
-                if not response_was_streamed and hasattr(final_result, 'response') and final_result.response:
-                    logger.info(f"📝 Sending non-streamed response: {final_result.response[:100]}...")
-                    yield {
-                        'type': 'token',
-                        'content': final_result.response
-                    }
-                elif response_was_streamed:
-                    logger.info(f"✅ Response was streamed successfully")
-            else:
-                logger.warning("No final result received from streaming")
-
-            # Send final graph update
+            # Send final graph update to ensure client has latest state
             logger.info("📤 Sending final graph update")
             yield {
                 'type': 'graph_update',
                 'graph_data': graph_data
             }
+            logger.info("✅ Stream completed successfully")
+
             logger.info("✅ Stream completed successfully")
 
         except Exception as e:
