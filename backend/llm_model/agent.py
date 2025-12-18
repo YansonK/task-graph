@@ -112,10 +112,12 @@ class Agent:
                 logger.warning("No final result received from streaming")
 
             # Send final graph update
+            logger.info("📤 Sending final graph update")
             yield {
                 'type': 'graph_update',
                 'graph_data': graph_data
             }
+            logger.info("✅ Stream completed successfully")
 
         except Exception as e:
             logger.error(f"Streaming error: {e}", exc_info=True)
