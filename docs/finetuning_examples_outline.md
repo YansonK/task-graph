@@ -212,6 +212,281 @@ trajectory = {
 
 ---
 
+## Raw LLM Output Format (Complete AI Response)
+
+To see the complete AI response including thinking output, you need to understand the **raw format** that the LLM produces. Your `StreamingLM` parses output from these DSPy markers:
+
+### DSPy Output Marker Format
+
+The model produces output with structured markers:
+
+```
+[[ ## next_thought ## ]]
+The user wants to build a blog platform with authentication. I need to create
+the main project task first, then break it down into subtasks for authentication
+and core blog functionality.
+
+[[ ## next_tool_name ## ]]
+'create_task_node'
+
+[[ ## next_tool_args ## ]]
+{"task_name": "Blog Platform", "task_description": "Full-stack blog with user authentication"}
+
+[[ ## completed ## ]]
+```
+
+### Complete Raw Response Example (Single Step)
+
+This is what the model actually outputs for **one iteration** of the ReAct loop:
+
+```
+[[ ## next_thought ## ]]
+The user wants to mark the authentication task as complete. I can see from the
+task_nodes that node_2 is "User Authentication" with status "inProgress".
+I should use update_task_status to mark it as completed.
+
+[[ ## next_tool_name ## ]]
+'update_task_status'
+
+[[ ## next_tool_args ## ]]
+{"node_id": "node_2", "status": "completed"}
+
+[[ ## completed ## ]]
+```
+
+### Complete Raw Response Example (Multi-Step with Final Response)
+
+For a complete interaction, each ReAct iteration produces output like above, then the final response:
+
+**Iteration 1 (Thinking + Tool Call):**
+```
+[[ ## next_thought ## ]]
+The user wants to build a web application. I'll start by creating the main
+project task node.
+
+[[ ## next_tool_name ## ]]
+'create_task_node'
+
+[[ ## next_tool_args ## ]]
+{"task_name": "Web Application", "task_description": "Full-stack web application project"}
+
+[[ ## completed ## ]]
+```
+
+**Iteration 2 (After observation, continue):**
+```
+[[ ## next_thought ## ]]
+I've created the main task. Now I should add frontend and backend subtasks
+to give the user a good starting structure.
+
+[[ ## next_tool_name ## ]]
+'create_task_node'
+
+[[ ## next_tool_args ## ]]
+{"task_name": "Frontend", "task_description": "UI and client-side code", "parent_id": "node_1"}
+
+[[ ## completed ## ]]
+```
+
+**Iteration 3 (Backend subtask):**
+```
+[[ ## next_thought ## ]]
+Frontend is created. Now adding the backend subtask.
+
+[[ ## next_tool_name ## ]]
+'create_task_node'
+
+[[ ## next_tool_args ## ]]
+{"task_name": "Backend", "task_description": "API and server-side logic", "parent_id": "node_1"}
+
+[[ ## completed ## ]]
+```
+
+**Iteration 4 (Finishing):**
+```
+[[ ## next_thought ## ]]
+I've created a good basic structure with the main task and two subtasks.
+The user can now expand these further. Time to finish and respond.
+
+[[ ## next_tool_name ## ]]
+'finish'
+
+[[ ## next_tool_args ## ]]
+{}
+
+[[ ## completed ## ]]
+```
+
+**Final Response Extraction:**
+```
+[[ ## response ## ]]
+I've created your web application project with two main subtasks: Frontend and Backend.
+Would you like me to break these down further into more specific tasks?
+
+[[ ## completed ## ]]
+```
+
+### Training Example with Raw Format
+
+For fine-tuning, you may want to capture the complete raw outputs:
+
+```python
+training_example = dspy.Example(
+    # Inputs
+    conversation_history="User: I want to build a blog platform with authentication",
+    task_nodes={"nodes": [], "links": []},
+
+    # Raw LLM outputs for each step (what the model should learn to produce)
+    raw_outputs=[
+        # Step 0
+        """[[ ## next_thought ## ]]
+The user wants to build a blog platform with authentication. I'll create the main project task first.
+
+[[ ## next_tool_name ## ]]
+'create_task_node'
+
+[[ ## next_tool_args ## ]]
+{"task_name": "Blog Platform", "task_description": "Full-stack blog with user authentication"}
+
+[[ ## completed ## ]]""",
+
+        # Step 1
+        """[[ ## next_thought ## ]]
+Now I need to add the authentication feature as a subtask under the main project.
+
+[[ ## next_tool_name ## ]]
+'create_task_node'
+
+[[ ## next_tool_args ## ]]
+{"task_name": "User Authentication", "task_description": "Login, registration, password reset", "parent_id": "node_1"}
+
+[[ ## completed ## ]]""",
+
+        # Step 2 (finish)
+        """[[ ## next_thought ## ]]
+I've created a good initial breakdown. Time to finish and respond to the user.
+
+[[ ## next_tool_name ## ]]
+'finish'
+
+[[ ## next_tool_args ## ]]
+{}
+
+[[ ## completed ## ]]"""
+    ],
+
+    # Observations from tool execution (what gets appended to trajectory)
+    observations=[
+        {"id": "node_1", "name": "Blog Platform", "description": "Full-stack blog with user authentication"},
+        {"id": "node_2", "name": "User Authentication", "description": "Login, registration, password reset", "parent_id": "node_1"},
+        "Completed."
+    ],
+
+    # Final response
+    response="I've created a task breakdown for your blog platform. Would you like me to add more subtasks?"
+
+).with_inputs("conversation_history", "task_nodes")
+```
+
+### Parsed vs Raw Format Comparison
+
+| Component | Raw LLM Output | Parsed Trajectory |
+|-----------|---------------|-------------------|
+| Thought | `[[ ## next_thought ## ]]\nThe user wants...` | `"thought_0": "The user wants..."` |
+| Tool Name | `[[ ## next_tool_name ## ]]\n'create_task_node'` | `"tool_name_0": "create_task_node"` |
+| Tool Args | `[[ ## next_tool_args ## ]]\n{"task_name": ...}` | `"tool_args_0": {"task_name": ...}` |
+| Observation | (returned from tool execution) | `"observation_0": {...}` |
+
+### Capturing Complete Traces for Training
+
+To capture complete AI responses for training data generation:
+
+```python
+import json
+from typing import List, Dict, Any
+
+class TrajectoryCapture:
+    """Capture complete LLM outputs for training data generation."""
+
+    def __init__(self):
+        self.raw_outputs: List[str] = []
+        self.parsed_trajectory: Dict[str, Any] = {}
+        self.observations: List[Any] = []
+        self.step = 0
+
+    def capture_llm_output(self, raw_response: str):
+        """Capture raw LLM output before parsing."""
+        self.raw_outputs.append(raw_response)
+
+        # Also parse into trajectory format
+        thought = self._extract_field(raw_response, "next_thought")
+        tool_name = self._extract_field(raw_response, "next_tool_name")
+        tool_args = self._extract_field(raw_response, "next_tool_args")
+
+        self.parsed_trajectory[f"thought_{self.step}"] = thought
+        self.parsed_trajectory[f"tool_name_{self.step}"] = tool_name.strip("'\"")
+        self.parsed_trajectory[f"tool_args_{self.step}"] = json.loads(tool_args) if tool_args != "{}" else {}
+
+    def capture_observation(self, observation: Any):
+        """Capture tool execution result."""
+        self.observations.append(observation)
+        self.parsed_trajectory[f"observation_{self.step}"] = observation
+        self.step += 1
+
+    def _extract_field(self, text: str, field: str) -> str:
+        """Extract a field from DSPy markers."""
+        import re
+        pattern = rf'\[\[ ## {field} ## \]\](.*?)(?=\[\[|$)'
+        match = re.search(pattern, text, re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    def to_training_example(self, inputs: Dict, final_response: str):
+        """Convert captured data to a training example."""
+        import dspy
+
+        return dspy.Example(
+            **inputs,
+            raw_outputs=self.raw_outputs,
+            trajectory=self.parsed_trajectory,
+            observations=self.observations,
+            response=final_response
+        ).with_inputs(*inputs.keys())
+```
+
+### Integration with Your StreamingLM
+
+Your `streaming_lm.py` already parses these fields. To capture for training:
+
+```python
+# In streaming_lm.py, add capture capability:
+
+class StreamingLM(dspy.LM):
+    def __init__(self, model: str, api_key: str, stream_queue: queue.Queue,
+                 capture_for_training: bool = False):
+        super().__init__(model=model, api_key=api_key)
+        self.capture_for_training = capture_for_training
+        self.captured_outputs = []  # Store raw outputs for training
+
+    def __call__(self, prompt=None, messages=None, **kwargs):
+        # ... existing code ...
+
+        # After getting full_response:
+        if self.capture_for_training:
+            self.captured_outputs.append({
+                "prompt": prompt or messages,
+                "raw_output": full_response,
+                "parsed": {
+                    "thought": self._extract_thought(full_response),
+                    "tool_name": self._extract_tool_name(full_response),
+                    "tool_args": self._extract_tool_args(full_response)
+                }
+            })
+
+        return [full_response]
+```
+
+---
+
 ## Category 1: Single Tool Usage Examples
 
 ### 1.1 Create Task Node Examples
